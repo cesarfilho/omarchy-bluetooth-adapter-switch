@@ -2,9 +2,20 @@
 # Bluetooth adapter helper for the Omarchy "Bluetooth Adapter Switch" plugin.
 #
 #   bt-adapter.sh status        one line per adapter: hciN|ADDRESS|ALIAS|powered|blocked
+#   bt-adapter.sh json          JSON array with everything the widget shows: kind
+#                               (onboard|usb|other), model, paired devices, ...
 #   bt-adapter.sh use <hciN>    make <hciN> the only powered adapter
 #   bt-adapter.sh next          make the next adapter (in hciN order) the active one
 #   bt-adapter.sh all-on        unblock and power on every adapter
+#   bt-adapter.sh forget <hciN> <ADDRESS>
+#                               unpair a device from the adapter it is paired to
+#   bt-adapter.sh connect|disconnect <hciN> <ADDRESS>
+#   bt-adapter.sh pair <hciN> <ADDRESS>   pair, trust and connect a new device
+#   bt-adapter.sh audio <ADDRESS>         make that device the default audio output
+#   bt-adapter.sh log [lines]   show the end of the plugin log (see "Logging" below)
+#   bt-adapter.sh scan <hciN> [seconds] [bredr|le|auto]
+#                               look for devices on one adapter until the process
+#                               is stopped (default 45 s, classic BR/EDR only)
 #
 # Runs as the logged-in user: rfkill is writable through the logind ACL on
 # /dev/rfkill, and BlueZ accepts property writes from an active session.
@@ -12,6 +23,24 @@
 set -u
 
 BLUEZ=org.bluez
+
+# Logging. Every action (switch, connect, pair, forget, scan, ...) is recorded
+# with its outcome in $LOG, and a failure also writes a snapshot of the adapters,
+# rfkill, the device involved and the latest bluetoothd messages, so a problem
+# can be diagnosed after the error has left the screen. Polling (status/json) is
+# not logged. The file rotates at 256 KB, keeping one previous copy.
+STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-bluetooth-adapter-switch
+LOG=$STATE_DIR/plugin.log
+
+log() { # <LEVEL> <message...>
+  local level=$1; shift
+  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  if [[ -f $LOG ]] && (( $(stat -c %s "$LOG" 2>/dev/null || echo 0) > 262144 )); then
+    mv -f "$LOG" "$LOG.1" 2>/dev/null
+  fi
+  printf '%s %-5s [%s] %s\n' "$(date '+%F %T')" "$level" "$$" "$*" >>"$LOG" 2>/dev/null
+  return 0
+}
 
 adapters() {
   rfkill -J -o DEVICE,TYPE 2>/dev/null |
@@ -45,6 +74,69 @@ rf() { # <block|unblock> <hci>
 
 valid_adapter() { adapters | grep -qx -- "$1"; }
 
+# Where the adapter is attached: "onboard" (soldered USB/PCIe chip), "usb" (a
+# removable dongle) or "other". Read from sysfs, so it needs no privileges.
+adapter_info() { # <hci> -> kind<TAB>model
+  local dev usb kind=other removable vendor model props
+  dev=$(readlink -f "/sys/class/bluetooth/$1/device" 2>/dev/null) || return 0
+  usb=$dev
+  while [[ -n $usb && $usb != / && ! -f $usb/idVendor ]]; do usb=$(dirname "$usb"); done
+  if [[ -f $usb/idVendor ]]; then
+    read -r removable < "$usb/removable" 2>/dev/null || removable=unknown
+    case $removable in
+      fixed) kind=onboard ;;
+      removable) kind=usb ;;
+    esac
+    props=$(udevadm info -q property -p "$usb" 2>/dev/null)
+    vendor=$(sed -n 's/^ID_VENDOR_FROM_DATABASE=//p' <<<"$props" | awk '{print $1}')
+    model=$(sed -n 's/^ID_MODEL_FROM_DATABASE=//p' <<<"$props")
+    [[ -n $model ]] || model=$(sed -n 's/^ID_MODEL=//p' <<<"$props" | tr '_' ' ')
+    [[ -n $vendor && $model != "$vendor"* ]] && model="$vendor $model"
+  elif [[ $dev == */platform/* || $dev == */serial* ]]; then
+    kind=onboard
+  fi
+  printf '%s\t%s\n' "$kind" "$model"
+}
+
+json() {
+  local managed rf hci info kind model rows=""
+  managed=$(busctl --system --json=short call "$BLUEZ" / org.freedesktop.DBus.ObjectManager GetManagedObjects 2>/dev/null) ||
+    managed='{"data":[{}]}'
+  rf=$(rfkill -J -o DEVICE,TYPE,SOFT 2>/dev/null) || rf='{}'
+  for hci in $(adapters); do
+    info=$(adapter_info "$hci")
+    kind=${info%%$'\t'*}
+    model=${info#*$'\t'}
+    rows+="$hci"$'\t'"$kind"$'\t'"$model"$'\n'
+  done
+  jq -n --argjson bz "$managed" --argjson rf "$rf" --arg rows "$rows" '
+    ($bz.data[0] // {}) as $o
+    | [ $rows | split("\n")[] | select(length > 0) | split("\t")
+        | { hci: .[0], kind: .[1], model: (.[2] // "") } as $s
+        | ($o["/org/bluez/" + $s.hci]["org.bluez.Adapter1"] // {}) as $a
+        | $s + {
+            address: ($a.Address.data // ""),
+            alias:   ($a.Alias.data // $s.hci),
+            powered: ($a.Powered.data // false),
+            blocked: ([$rf.rfkilldevices[]? | select(.device == $s.hci and .soft == "blocked")] | length > 0),
+            devices: [ $o | to_entries[]
+                       | select(.value["org.bluez.Device1"] != null)
+                       | .value as $v | $v["org.bluez.Device1"] as $d
+                       | select($d.Adapter.data == "/org/bluez/" + $s.hci and $d.Paired.data == true)
+                       | { address: $d.Address.data, name: ($d.Alias.data // $d.Address.data),
+                           connected: ($d.Connected.data // false),
+                           battery: ($v["org.bluez.Battery1"].Percentage.data // null),
+                           hasProfile: ($d.Icon != null or $d.Class != null
+                                        or ([$d.UUIDs.data[]? | select(test("^0000(110b|111e|110e|1124|1812)-"))] | length > 0)) } ],
+            nearby: [ $o | to_entries[]
+                      | .value["org.bluez.Device1"]? // empty
+                      | select(.Adapter.data == "/org/bluez/" + $s.hci and (.Paired.data // false) == false and .RSSI != null)
+                      | { address: .Address.data, name: (.Alias.data // .Address.data), rssi: .RSSI.data,
+                          hasProfile: (.Icon != null or .Class != null) } ]
+                    | sort_by([(if .hasProfile then 0 else 1 end), -.rssi])
+          } ]'
+}
+
 status() {
   local hci
   for hci in $(adapters); do
@@ -57,12 +149,19 @@ use() {
   local target=$1 hci
   valid_adapter "$target" || { echo "unknown adapter: $target" >&2; exit 2; }
   # Bring the target up first so there is never a moment with no adapter.
+  # After an rfkill unblock BlueZ needs a moment before it accepts Powered, so
+  # retry instead of trusting a single attempt.
   rf unblock "$target"
-  for _ in 1 2 3 4 5 6 7 8 9 10; do
-    [[ -n $(prop "$target" Address) ]] && break
+  local up=0
+  for _ in {1..25}; do
+    if [[ -n $(prop "$target" Address) ]] && set_powered "$target" true; then up=1; break; fi
     sleep 0.2
   done
-  set_powered "$target" true
+  # Never turn the others off if the target did not come up.
+  if (( ! up )); then
+    echo "could not power on $target" >&2
+    exit 1
+  fi
   for hci in $(adapters); do
     [[ $hci == "$target" ]] && continue
     set_powered "$hci" false
@@ -90,17 +189,210 @@ next() {
 }
 
 all_on() {
-  local hci
+  local hci failed=0
   for hci in $(adapters); do
     rf unblock "$hci"
-    set_powered "$hci" true
+    set_powered "$hci" true || { echo "could not power on $hci" >&2; failed=1; }
   done
+  return $failed
 }
+
+# Unpair a device on the adapter that owns it. `bluetoothctl remove` only acts
+# on the default controller, so a device paired to the other adapter could not
+# be forgotten that way; BlueZ's own RemoveDevice takes the adapter explicitly.
+forget() { # <hci> <address>
+  local hci=$1 addr=${2^^} path err
+  valid_adapter "$hci" || { echo "unknown adapter: $hci" >&2; exit 2; }
+  [[ $addr =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]] || { echo "invalid address: $2" >&2; exit 2; }
+  path="/org/bluez/$hci/dev_${addr//:/_}"
+  # Drop the link first; a device that is not connected just refuses, which is fine.
+  timeout 10 busctl --system call "$BLUEZ" "$path" org.bluez.Device1 Disconnect >/dev/null 2>&1 || true
+  if ! err=$(busctl --system call "$BLUEZ" "/org/bluez/$hci" org.bluez.Adapter1 RemoveDevice o "$path" 2>&1); then
+    echo "could not forget $addr on $hci: ${err#Call failed: }" >&2
+    exit 1
+  fi
+}
+
+dev_path() { # <hci> <address> -> BlueZ object path, validating both
+  valid_adapter "$1" || { echo "unknown adapter: $1" >&2; exit 2; }
+  local addr=${2^^}
+  [[ $addr =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]] || { echo "invalid address: $2" >&2; exit 2; }
+  printf '/org/bluez/%s/dev_%s' "$1" "${addr//:/_}"
+}
+
+dev_call() { # <path> <method> <timeout> -> runs the call, prints a readable reason on failure
+  local err
+  if ! err=$(timeout "$3" busctl --system call "$BLUEZ" "$1" org.bluez.Device1 "$2" 2>&1); then
+    err=${err#Call failed: }
+    case $err in
+      "")                                   err="no response from the device. Turn it on, bring it close and make sure no other device is connected to it" ;;
+      *"doesn't exist"*|*"Does Not Exist"*) err="device not found on this adapter (scan and pair it first)" ;;
+      *InProgress*|*"In Progress"*)         err="another attempt is still running; wait a few seconds and try again" ;;
+      *"Page Timeout"*|*"Host is down"*|*"host is down"*) err="the device is out of range or switched off" ;;
+      *AlreadyConnected*)                   return 0 ;;
+    esac
+    echo "$err" >&2
+    return 1
+  fi
+}
+
+adapter_on() { # <hci>
+  [[ $(prop "$1" Powered) == true ]] || { echo "$1 is off; switch to it first" >&2; exit 1; }
+}
+
+# A pairing made over Low Energy has only generic GATT services. For a headset
+# that means no audio profile, so connecting cannot work: say so.
+le_only_hint() { # <path>
+  local uuids
+  uuids=$(busctl --system get-property "$BLUEZ" "$1" org.bluez.Device1 UUIDs 2>/dev/null) || return 0
+  [[ -n $uuids ]] || return 0
+  case $uuids in
+    *0000110b-*|*0000111e-*|*0000110e-*|*00001124-*|*00001812-*) ;;
+    *) echo "This pairing only has Bluetooth Low Energy services (no audio or input profile). Forget it and pair again with a classic scan." >&2 ;;
+  esac
+}
+
+# Make a connected device the default audio output and move what is playing to
+# it. Connecting alone leaves the sound on the speakers: the Bluetooth sink only
+# shows up a moment after the link, and nothing selects it.
+audio_output() { # <address>
+  local addr=${1^^} want name id i
+  want="bluez_output.${addr//:/_}"
+  for i in {1..20}; do
+    name=$(pactl list short sinks 2>/dev/null | awk -v w="$want" 'index($2, w) == 1 { print $2; exit }')
+    [[ -n $name ]] && break
+    sleep 0.4
+  done
+  if [[ -z $name ]]; then
+    log WARN "audio: no sink appeared for $addr (is the headset on the audio profile?)"
+    return 1
+  fi
+  id=$(pactl list sinks 2>/dev/null | awk -v n="$name" '$1 == "Name:" { cur = $2 } /object.id =/ { if (cur == n) { gsub(/"/, "", $3); print $3; exit } }')
+  if command -v omarchy-audio-output-set-default >/dev/null && [[ -n $id ]]; then
+    omarchy-audio-output-set-default "$id" "$name"
+  else
+    pactl set-default-sink "$name" 2>/dev/null
+    pactl list short sink-inputs 2>/dev/null | awk '{ print $1 }' |
+      while read -r i; do pactl move-sink-input "$i" "$name" 2>/dev/null || true; done
+  fi
+  log INFO "audio: default output -> $name"
+}
+
+connect() { # <hci> <address>
+  local p; p=$(dev_path "$1" "$2") || exit $?
+  adapter_on "$1"
+  if ! dev_call "$p" Connect 15; then
+    # A Connect that never answered keeps running inside BlueZ and makes the
+    # next attempt fail with InProgress; Disconnect cancels it.
+    timeout 5 busctl --system call "$BLUEZ" "$p" org.bluez.Device1 Disconnect >/dev/null 2>&1 || true
+    le_only_hint "$p"
+    exit 1
+  fi
+  audio_output "$2" || true
+}
+
+disconnect() { # <hci> <address>
+  local p; p=$(dev_path "$1" "$2") || exit $?
+  dev_call "$p" Disconnect 10 || exit 1
+}
+
+pair() { # <hci> <address>
+  local p; p=$(dev_path "$1" "$2") || exit $?
+  adapter_on "$1"
+  if ! busctl --system get-property "$BLUEZ" "$p" org.bluez.Device1 Address >/dev/null 2>&1; then
+    echo "the device is no longer visible. Put it in pairing mode (headsets: hold the button until the light flashes) and scan again" >&2
+    exit 1
+  fi
+  dev_call "$p" Pair 40 || exit 1
+  # Trusted lets the device reconnect by itself next time.
+  busctl --system set-property "$BLUEZ" "$p" org.bluez.Device1 Trusted b true >/dev/null 2>&1 || true
+  dev_call "$p" Connect 15 || true
+  audio_output "$2" || true
+}
+
+# Device discovery only lasts while the process that asked for it is alive, so
+# this keeps a bluetoothctl session open on the chosen adapter and closes it
+# when told to stop (or after <seconds>).
+# Transport matters: earbuds and speakers that advertise over Low Energy get
+# paired as LE-only entries with no audio profile, which can never carry sound.
+# Searching over classic BR/EDR finds the audio identity of the same device.
+scan() { # <hci> [seconds] [bredr|le|auto]
+  local hci=$1 secs=${2:-45} transport=${3:-bredr} addr
+  valid_adapter "$hci" || { echo "unknown adapter: $hci" >&2; exit 2; }
+  adapter_on "$hci"
+  addr=$(prop "$hci" Address)
+  coproc BT { exec bluetoothctl >/dev/null 2>&1; }
+  local fd=${BT[1]}
+  stop() { printf 'scan off\nquit\n' >&"$fd" 2>/dev/null; kill "${sleeper:-0}" 2>/dev/null; }
+  trap 'stop; wait "$BT_PID" 2>/dev/null; exit 0' TERM INT
+  case $transport in bredr|le|auto) ;; *) transport=bredr ;; esac
+  printf 'select %s\nmenu scan\ntransport %s\nback\nscan on\n' "$addr" "$transport" >&"$fd"
+  sleep "$secs" & sleeper=$!
+  wait "$sleeper"
+  stop
+  wait "$BT_PID" 2>/dev/null
+}
+
+# Snapshot written to the log when an action fails.
+diagnose() { # <the failed command line...>
+  local p addr pr l
+  log DIAG "rfkill: $(rfkill -J -o ID,DEVICE,SOFT,HARD 2>/dev/null | jq -c '.rfkilldevices' 2>/dev/null)"
+  log DIAG "adapters: $(json 2>/dev/null | jq -c '[.[] | {hci, kind, powered, blocked, paired: (.devices | length)}]' 2>/dev/null)"
+  if [[ ${2:-} =~ ^hci[0-9]+$ && ${3:-} =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+    addr=${3^^}
+    p=/org/bluez/$2/dev_${addr//:/_}
+    if ! busctl --system get-property "$BLUEZ" "$p" org.bluez.Device1 Address >/dev/null 2>&1; then
+      log DIAG "device $addr is not known to BlueZ on ${2} (not paired and not seen recently)"
+    else
+      for pr in Paired Bonded Trusted Connected Blocked ServicesResolved AddressType Icon Class RSSI UUIDs; do
+        log DIAG "device $addr $pr: $(busctl --system get-property "$BLUEZ" "$p" org.bluez.Device1 "$pr" 2>&1 | cut -c1-240)"
+      done
+    fi
+  fi
+  journalctl -u bluetooth --since "-2min" --no-pager -q 2>/dev/null | grep -v adv_monitor | tail -12 |
+    while IFS= read -r l; do log DIAG "bluetoothd: $l"; done
+}
+
+on_action_exit() {
+  local rc=$? ms err
+  trap - EXIT
+  sleep 0.1 # let the stderr copy reach the file
+  ms=$(( ($(date +%s%N) - ACTION_START_NS) / 1000000 ))
+  err=$(tr '\n' ' ' <"$ACTION_ERRFILE" 2>/dev/null)
+  rm -f "$ACTION_ERRFILE"
+  if (( rc == 0 )); then
+    log INFO "ok: $ACTION_ARGS (${ms}ms)${err:+ stderr: $err}"
+  else
+    log ERROR "failed rc=$rc after ${ms}ms: $ACTION_ARGS :: $err"
+    diagnose "${ACTION_ARR[@]}" 2>/dev/null
+  fi
+}
+
+case ${1:-} in
+  use|next|all-on|forget|connect|disconnect|pair|scan|audio)
+    ACTION_ARGS=$*
+    ACTION_ARR=("$@")
+    ACTION_START_NS=$(date +%s%N)
+    ACTION_ERRFILE=$(mktemp)
+    log INFO "run: $ACTION_ARGS"
+    exec 2> >(tee -a "$ACTION_ERRFILE" >&2)
+    trap on_action_exit EXIT
+    ;;
+esac
 
 case ${1:-status} in
   status) status ;;
+  json) json ;;
+  log) [[ -f $LOG ]] && tail -n "${2:-60}" "$LOG" || echo "no log yet: $LOG" ;;
+  log-path) echo "$LOG" ;;
   use) use "${2:?usage: bt-adapter.sh use <hciN>}" ;;
   next) next ;;
   all-on) all_on ;;
-  *) echo "usage: bt-adapter.sh status|use <hciN>|next|all-on" >&2; exit 64 ;;
+  connect) connect "${2:?usage: bt-adapter.sh connect <hciN> <ADDRESS>}" "${3:?usage}" ;;
+  disconnect) disconnect "${2:?usage: bt-adapter.sh disconnect <hciN> <ADDRESS>}" "${3:?usage}" ;;
+  pair) pair "${2:?usage: bt-adapter.sh pair <hciN> <ADDRESS>}" "${3:?usage}" ;;
+  audio) audio_output "${2:?usage: bt-adapter.sh audio <ADDRESS>}" || exit 1 ;;
+  scan) scan "${2:?usage: bt-adapter.sh scan <hciN> [seconds] [bredr|le|auto]}" "${3:-45}" "${4:-bredr}" ;;
+  forget) forget "${2:?usage: bt-adapter.sh forget <hciN> <ADDRESS>}" "${3:?usage: bt-adapter.sh forget <hciN> <ADDRESS>}" ;;
+  *) echo "usage: bt-adapter.sh status|json|log|use <hciN>|next|all-on|forget|connect|disconnect|pair <hciN> <ADDRESS>|scan <hciN> [secs]" >&2; exit 64 ;;
 esac
