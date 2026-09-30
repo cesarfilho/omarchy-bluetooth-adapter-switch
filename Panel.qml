@@ -6,7 +6,7 @@ import qs.Ui
 // actions; this file is only the view, injected with `hostWidget`.
 //
 // Keys: Up/Down (or j/k) move, Enter selects, 1-9 pick an adapter directly,
-// A turns every adapter on, R refreshes, Esc closes.
+// R refreshes, Esc closes.
 Panel {
   id: root
   moduleName: "io.github.cesarfilho.bluetooth-adapter-switch"
@@ -27,16 +27,15 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property color dim: Qt.darker(foreground, 1.5)
 
-  // Keyboard cursor: 0..n-1 are adapters, n is the "all adapters" row.
+  // Keyboard cursor over the adapter rows.
   property bool cursorActive: false
   property int cursorIndex: 0
-  readonly property int rowCount: adapters.length + (adapters.length > 1 ? 1 : 0)
+  readonly property int rowCount: adapters.length
 
   readonly property string heroMeta: {
-    if (busy) return pending === "all" ? "Turning everything on…" : "Switching adapter…"
+    if (busy) return pending === "auto" ? "Choosing automatically…" : "Switching adapter…"
     if (!hostWidget || !hostWidget.loaded) return "Reading adapters…"
     if (adapters.length === 0) return "No adapter found"
-    if (poweredCount > 1) return "All adapters on"
     if (active) return "Using " + hostWidget.nameFor(active)
     return "No adapter active"
   }
@@ -67,7 +66,6 @@ Panel {
   function activateCursor() {
     if (!hostWidget || !cursorActive) return
     if (cursorIndex < adapters.length) hostWidget.use(adapters[cursorIndex].hci)
-    else hostWidget.allOn()
   }
 
   function pickNumber(n) {
@@ -117,7 +115,6 @@ Panel {
         var k = t.toLowerCase()
         if (k === "j") root.moveCursor(1)
         else if (k === "k") root.moveCursor(-1)
-        else if (k === "a" && root.hostWidget) root.hostWidget.allOn()
         else if (k === "r" && root.hostWidget) root.hostWidget.refresh()
         else if (k >= "1" && k <= "9") root.pickNumber(parseInt(k, 10))
       }
@@ -202,67 +199,25 @@ Panel {
           }
 
           Text {
-            visible: root.adapters.length === 1
+            visible: root.adapters.length > 1
             width: parent.width
             textFormat: Text.PlainText
             wrapMode: Text.Wrap
-            text: "Plug in a second adapter to switch between them."
+            text: "Only one adapter is active at a time. Plugging a dongle in or out switches automatically."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
           }
-        }
 
-        PanelSeparator {
-          visible: root.adapters.length > 1
-          foreground: root.foreground
-        }
-
-        // Turn everything back on: the way out if you blocked the wrong one.
-        CursorSurface {
-          id: allRow
-          visible: root.adapters.length > 1
-          width: parent.width
-          implicitHeight: allText.implicitHeight + Style.spacing.rowPaddingX
-          foreground: root.foreground
-          hasCursor: root.cursorActive && root.cursorIndex === root.adapters.length
-          current: root.poweredCount > 1
-          opacity: root.busy ? 0.6 : 1.0
-
-          MouseArea {
-            anchors.fill: parent
-            hoverEnabled: true
-            cursorShape: Qt.PointingHandCursor
-            onContainsMouseChanged: if (containsMouse) {
-              root.cursorActive = true
-              root.cursorIndex = root.adapters.length
-            }
-            onClicked: if (root.hostWidget) root.hostWidget.allOn()
-          }
-
-          Row {
-            anchors.verticalCenter: parent.verticalCenter
-            anchors.left: parent.left
-            anchors.leftMargin: Style.space(10)
-            spacing: Style.space(10)
-
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              textFormat: Text.PlainText
-              text: "󰂱"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.heading
-            }
-            Text {
-              id: allText
-              anchors.verticalCenter: parent.verticalCenter
-              textFormat: Text.PlainText
-              text: "Turn on all adapters"
-              color: root.foreground
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.body
-            }
+          Text {
+            visible: root.adapters.length === 1
+            width: parent.width
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            text: "Plug in a second adapter and it becomes the active one."
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
           }
         }
 
@@ -271,7 +226,7 @@ Panel {
           textFormat: Text.PlainText
           horizontalAlignment: Text.AlignHCenter
           text: root.adapters.length > 1
-            ? "↵ select   1-9 pick   A all on   R refresh   Esc close"
+            ? "↵ select   1-9 pick   R refresh   Esc close"
             : "R refresh   Esc close"
           color: root.dim
           font.family: root.fontFamily
@@ -289,6 +244,11 @@ Panel {
     readonly property bool isOn: adapter && adapter.powered && !adapter.blocked
     readonly property bool isSole: isOn && root.poweredCount === 1
     readonly property bool isPending: root.busy && root.pending === adapter.hci
+    // What the switch shows. While a pick to a known adapter is in flight it
+    // already shows the outcome: the picked one on, every other one off.
+    readonly property bool shownOn: root.busy && root.pending.indexOf("hci") === 0
+      ? root.pending === adapter.hci
+      : isOn
     readonly property var dropped: !isOn && rowHot ? root.droppedDevices(adapter.hci) : []
     readonly property bool rowHot: hasCursor
 
@@ -322,14 +282,14 @@ Panel {
         id: mark
         anchors.verticalCenter: parent.verticalCenter
         textFormat: Text.PlainText
-        text: row.isPending ? "󰑐" : (row.isOn ? "󰐾" : "󰄰")
-        color: row.isOn || row.isPending ? root.foreground : root.dim
+        text: row.shownOn ? "󰂯" : "󰂲"
+        color: row.shownOn ? root.foreground : root.dim
         font.family: root.fontFamily
         font.pixelSize: Style.font.heading
       }
 
       Column {
-        width: parent.width - mark.width - stateText.width - parent.spacing * 2
+        width: parent.width - mark.width - stateSwitch.width - parent.spacing * 2
         anchors.verticalCenter: parent.verticalCenter
         spacing: Style.space(1)
 
@@ -365,16 +325,16 @@ Panel {
         }
       }
 
-      Text {
-        id: stateText
+      // Radio-style switch: turning one adapter on turns the other off. The row
+      // owns the click, so the switch only shows the state.
+      ToggleSwitch {
+        id: stateSwitch
         anchors.verticalCenter: parent.verticalCenter
-        textFormat: Text.PlainText
-        text: row.isPending ? "Switching…" : (row.isOn ? "Active" : "Off")
-        color: row.isOn ? root.foreground : root.dim
-        font.family: root.fontFamily
-        font.pixelSize: Style.font.caption
-        font.bold: true
-        font.letterSpacing: 1.0
+        interactive: false
+        cursorRing: false
+        checked: row.shownOn
+        busy: root.busy
+        foreground: root.foreground
       }
     }
   }

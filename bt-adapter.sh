@@ -6,7 +6,14 @@
 #                               (onboard|usb|other), model, paired devices, ...
 #   bt-adapter.sh use <hciN>    make <hciN> the only powered adapter
 #   bt-adapter.sh next          make the next adapter (in hciN order) the active one
-#   bt-adapter.sh all-on        unblock and power on every adapter
+#   bt-adapter.sh auto [pref]   make the preferred adapter the only active one
+#   bt-adapter.sh ensure [pref] like auto, but only when zero or several are active
+#   bt-adapter.sh watch         print a line whenever a Bluetooth adapter is added,
+#                               removed or changes state (plug/unplug detection)
+#
+# Exactly one adapter is active at a time. [pref] is "usb" (default: a removable
+# dongle wins over the onboard chip, and the onboard chip is used when the dongle
+# is gone) or "onboard".
 #
 # Runs entirely with the logged-in user's own permissions: rfkill is writable
 # through the logind ACL on /dev/rfkill, and BlueZ accepts property writes from
@@ -150,13 +157,42 @@ next() {
   use "${pick:-${list[0]}}"
 }
 
-all_on() {
-  local hci failed=0
+# The adapter that should be active: the preferred kind if present, otherwise
+# the first adapter there is.
+preferred() { # [usb|onboard] -> hciN
+  local want=${1:-usb} hci first="" info
   for hci in $(adapters); do
-    rf unblock "$hci"
-    set_powered "$hci" true || { echo "could not power on $hci" >&2; failed=1; }
+    [[ -n $first ]] || first=$hci
+    info=$(adapter_info "$hci")
+    [[ ${info%%$'\t'*} == "$want" ]] && { echo "$hci"; return; }
   done
-  return $failed
+  echo "$first"
+}
+
+active_count() {
+  local hci n=0
+  for hci in $(adapters); do
+    is_blocked "$hci" && continue
+    [[ $(prop "$hci" Powered) == true ]] && n=$((n + 1))
+  done
+  echo "$n"
+}
+
+auto() {
+  local pick
+  pick=$(preferred "${1:-usb}")
+  [[ -n $pick ]] || return 0
+  use "$pick"
+}
+
+ensure() {
+  [[ $(active_count) == 1 ]] || auto "${1:-usb}"
+}
+
+# One line per Bluetooth rfkill event (add/remove/change). The first lines are
+# a dump of the adapters that already exist.
+watch() {
+  rfkill event | awk '/ type 2 / { print "event"; fflush() }'
 }
 
 case ${1:-status} in
@@ -164,6 +200,8 @@ case ${1:-status} in
   json) json ;;
   use) use "${2:?usage: bt-adapter.sh use <hciN>}" ;;
   next) next ;;
-  all-on) all_on ;;
-  *) echo "usage: bt-adapter.sh status|json|use <hciN>|next|all-on" >&2; exit 64 ;;
+  auto) auto "${2:-usb}" ;;
+  ensure) ensure "${2:-usb}" ;;
+  watch) watch ;;
+  *) echo "usage: bt-adapter.sh status|json|use <hciN>|next|auto [usb|onboard]|ensure [usb|onboard]|watch" >&2; exit 64 ;;
 esac

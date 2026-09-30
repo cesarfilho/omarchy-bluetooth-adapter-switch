@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.cesarfilho.bluetooth-adapter-switch",
   "name": "Bluetooth Adapter Switch",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "cesarfilho",
   "license": "MIT",
-  "description": "Switch between the onboard Bluetooth adapter and a USB dongle from the bar: click to open a panel that shows each adapter, what is paired to it and lets you pick one; scroll for the next adapter, right-click to turn every adapter back on.",
+  "description": "Keeps exactly one Bluetooth adapter active and switches automatically when a USB dongle is plugged in or out; a bar panel shows each adapter and lets you pick one.",
   "kinds": [
     "bar-widget"
   ],
@@ -21,6 +21,7 @@
     "defaults": {
       "showLabel": true,
       "refreshIntervalSec": 10,
+      "preferred": "USB dongle",
       "labelMode": "Type",
       "clickAction": "Open panel",
       "notify": true
@@ -31,6 +32,17 @@
         "type": "boolean",
         "label": "Show adapter name next to the icon",
         "defaultValue": true
+      },
+      {
+        "key": "preferred",
+        "type": "enum",
+        "label": "Preferred adapter",
+        "options": [
+          "USB dongle",
+          "Onboard"
+        ],
+        "defaultValue": "USB dongle",
+        "description": "Which adapter is active when several are present, for example right after plugging in a dongle."
       },
       {
         "key": "labelMode",

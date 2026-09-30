@@ -5,10 +5,15 @@ import qs.Ui
 
 // Bar widget for machines with more than one Bluetooth adapter.
 //
+// Exactly one adapter is active at a time. Plugging a dongle in makes it the
+// active adapter and unplugging it brings the onboard one back (or the reverse
+// if the preference is "Onboard"); a manual pick in between is kept until the
+// adapters change again.
+//
 // Left click opens a panel that lists every adapter with what it is (onboard
 // chip or USB dongle), which one is active and what is paired to it, and lets
 // you pick one. Scroll or middle click jumps straight to the next adapter and
-// right click turns every adapter back on. All the real work happens in
+// right click goes back to the automatic choice. All the real work happens in
 // bt-adapter.sh (rfkill + BlueZ over D-Bus, no privileges needed).
 BarWidget {
   id: root
@@ -18,15 +23,19 @@ BarWidget {
   property var adapters: []
   property bool loaded: false
   property bool busy: false
-  // What the running action is switching to: an hciN, "next" or "all".
+  // What the running action is switching to: an hciN, "next" or "auto".
   property string pending: ""
   property string lastError: ""
   property bool refreshQueued: false
   property bool announceNext: false
+  // Adapters seen on the previous read ("hciN:ADDRESS,..."), to notice plug and
+  // unplug; empty until the first read so starting the shell never switches.
+  property string knownSet: ""
 
   readonly property string helper: decodeURIComponent(String(Qt.resolvedUrl("bt-adapter.sh")).replace(/^file:\/\//, ""))
   readonly property bool showLabel: !vertical && setting("showLabel", true) !== false
   readonly property string labelMode: String(setting("labelMode", "Type"))
+  readonly property string preferKind: String(setting("preferred", "USB dongle")) === "Onboard" ? "onboard" : "usb"
   readonly property string clickAction: String(setting("clickAction", "Open panel"))
   readonly property bool notifyOnSwitch: setting("notify", true) !== false
   readonly property int refreshMs: Math.max(2, Number(setting("refreshIntervalSec", 10))) * 1000
@@ -51,7 +60,6 @@ BarWidget {
   readonly property string labelText: {
     if (busy) return "…"
     if (!active) return "off"
-    if (poweredCount > 1) return "all"
     return labelFor(active)
   }
 
@@ -65,7 +73,7 @@ BarWidget {
       lines.push(rowMark(a) + " " + nameFor(a) + "  " + a.hci + "  [" + stateOf(a) + "]")
     }
     lines.push(switchable
-      ? "Click: choose · Scroll: next · Right-click: all on"
+      ? "Click: choose · Scroll: next · Right-click: automatic"
       : "Plug in a second adapter to switch")
     return lines.join("\n")
   }
@@ -110,6 +118,26 @@ BarWidget {
     loaded = true
     if (announceNext) { announceNext = false; announce() }
     if (refreshQueued) { refreshQueued = false; refresh() }
+    settle()
+  }
+
+  // Keep exactly one adapter active. A change in the set of adapters (dongle
+  // plugged or unplugged) re-applies the preference; anything else only steps
+  // in when zero or several adapters are on.
+  function settle() {
+    var ready = []
+    for (var i = 0; i < adapters.length; i++)
+      if (adapters[i].address !== "") ready.push(adapters[i].hci + ":" + adapters[i].address)
+    // An adapter BlueZ has not registered yet has no address: wait for it.
+    if (ready.length !== adapters.length) return
+    // Mid-switch: leave knownSet alone so the change is still seen afterwards.
+    if (busy) return
+    var set = ready.join(",")
+    var changed = knownSet !== "" && set !== knownSet
+    knownSet = set
+    if (ready.length === 0) return
+    if (changed) run(["auto", preferKind], "auto")
+    else if (poweredCount !== 1) run(["ensure", preferKind], "auto")
   }
 
   function refresh() {
@@ -134,14 +162,13 @@ BarWidget {
     run(["use", hci], hci)
   }
   function next() { if (switchable) run(["next"], "next") }
-  function allOn() { run(["all-on"], "all") }
+  function automatic() { run(["auto", preferKind], "auto") }
 
   function announce() {
     if (!notifyOnSwitch) return
     var title = "Bluetooth adapter"
     var body
-    if (poweredCount > 1) body = "All adapters are on"
-    else if (active) body = "Using " + nameFor(active) + (active.model ? " · " + active.model : "")
+    if (active) body = "Using " + nameFor(active) + (active.model ? " · " + active.model : "")
     else body = "No adapter is active"
     notifyProc.command = ["notify-send", "-a", "Bluetooth Adapter Switch", "-i", "bluetooth",
                           "-h", "string:x-canonical-private-synchronous:bt-adapter-switch", title, body]
@@ -173,7 +200,7 @@ BarWidget {
 
   function triggerPress(mouseButton) {
     if (mouseButton === Qt.MiddleButton) next()
-    else if (mouseButton === Qt.RightButton) allOn()
+    else if (mouseButton === Qt.RightButton) automatic()
     else if (clickAction === "Switch to next") next()
     else togglePanel()
   }
@@ -233,6 +260,19 @@ BarWidget {
   }
 
   Process { id: notifyProc; command: [] }
+
+  // Plug and unplug: one line per Bluetooth adapter event, then re-read after
+  // things have settled (BlueZ registers a new adapter a moment after rfkill).
+  Process {
+    id: watchProc
+    command: ["bash", root.helper, "watch"]
+    running: true
+    stdout: SplitParser { onRead: settleTimer.restart() }
+    onExited: watchRestart.start()
+  }
+
+  Timer { id: watchRestart; interval: 3000; onTriggered: watchProc.running = true }
+  Timer { id: settleTimer; interval: 1200; onTriggered: root.refresh() }
 
   // Poll faster while the panel is open so it feels live.
   Timer {
