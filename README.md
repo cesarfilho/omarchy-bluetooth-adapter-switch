@@ -110,6 +110,24 @@ All are present on a standard Omarchy install: `bluez` (BlueZ over D-Bus),
 `util-linux` (`rfkill`), `systemd` (`busctl`, `udevadm`), `jq`, `gawk` (`awk`),
 `libnotify` (`notify-send`, only for the optional notification) and `bash`.
 
+## Development and releases
+
+Run `.github/scripts/validate.sh` before pushing. It checks the manifest, entry
+points and required files, and keeps out the wording the marketplace's security
+scan reacts to.
+
+GitHub Actions (`.github/workflows/release.yml`) validates every push to `main`
+and every pull request (manifest, ShellCheck). When a push to `main` carries a
+`version` in `manifest.json` that has no tag yet, it creates the tag `vX.Y.Z` on
+that commit and publishes a GitHub release with generated notes. To release:
+bump `version` in `manifest.json` and merge. Pushes that keep the same version
+are validated but not released.
+
+Optionally it can also ask the marketplace to publish the new commit, once the
+plugin is listed there: set the repository variable `MARKETPLACE_UPDATE` to
+`true` and add a `MARKETPLACE_TOKEN` secret (a token allowed to open issues on
+`omacom/omarchy-plugin-marketplace`). A marketplace maintainer still approves it.
+
 ## License
 
 [MIT](LICENSE)

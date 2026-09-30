@@ -1,0 +1,136 @@
+name: CI and release
+
+# Every push to main and every pull request is validated. A push to main whose
+# manifest.json `version` has no matching tag also becomes a release: the tag
+# vX.Y.Z is created on that commit and a GitHub release is published with
+# generated notes. To release, bump `version` in manifest.json and merge.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Validate manifest, files and wording
+        run: .github/scripts/validate.sh
+
+      - name: ShellCheck
+        run: shellcheck bt-adapter.sh .github/scripts/validate.sh
+
+      - name: Note when a pull request does not bump the version
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: origin/${{ github.base_ref }}
+        run: |
+          new=$(jq -r .version manifest.json)
+          old=$(git show "$BASE:manifest.json" 2>/dev/null | jq -r .version || true)
+          if [[ $new == "$old" ]]; then
+            echo "::notice::manifest.json version is still $new. Bump it to publish a release when this merges."
+          else
+            echo "::notice::Merging publishes release v$new."
+          fi
+
+  release:
+    needs: validate
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      released: ${{ steps.release.outputs.released }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Tag and publish when the version is new
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(jq -r .version manifest.json)
+          tag="v$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "Tag $tag already exists, nothing to release."
+            echo "released=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "$version" \
+            --generate-notes \
+            --latest
+          echo "released=true" >> "$GITHUB_OUTPUT"
+
+  # Optional: ask the marketplace to publish the new commit. Off by default. It
+  # needs the repository variable MARKETPLACE_UPDATE=true and a secret
+  # MARKETPLACE_TOKEN (a personal access token that may open issues on
+  # omacom/omarchy-plugin-marketplace), and it only makes sense once the plugin
+  # is already listed. A maintainer still has to approve the update.
+  marketplace:
+    needs: release
+    if: needs.release.outputs.released == 'true' && vars.MARKETPLACE_UPDATE == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Open a marketplace update request
+        env:
+          GH_TOKEN: ${{ secrets.MARKETPLACE_TOKEN }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          if [[ -z $GH_TOKEN ]]; then
+            echo "::warning::MARKETPLACE_TOKEN is not set, skipping the marketplace request."
+            exit 0
+          fi
+          plugin_id=io.github.cesarfilho.bluetooth-adapter-switch
+          body=$(cat <<EOF
+          ### Verification action
+
+          Verify and publish a newer upstream commit
+
+          ### Plugin ID
+
+          $plugin_id
+
+          ### Repository URL
+
+          https://github.com/$REPO
+
+          ### Target commit
+
+          $SHA
+
+          ### Verification acknowledgment
+
+          - [x] I understand that only the exact target commit can become a verified marketplace snapshot and that verification is not a security audit.
+
+          ### Standard installation acknowledgment
+
+          - [ ] I confirm that this listed root plugin supports the standard Omarchy installation path and does not require manual setup.
+          EOF
+          )
+          gh issue create \
+            --repo omacom/omarchy-plugin-marketplace \
+            --title "[Verify]: Bluetooth Adapter Switch $VERSION" \
+            --body "$body"
