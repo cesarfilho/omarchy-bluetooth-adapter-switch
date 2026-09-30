@@ -1,10 +1,17 @@
 # Bluetooth Adapter Switch
 
-An [Omarchy](https://omarchy.org/) bar widget for machines with more than one
-Bluetooth adapter, typically the onboard chip plus a USB dongle. It shows which
-adapter is active and switches between them with one click.
+An [Omarchy](https://omarchy.org/) bar widget for machines with two Bluetooth
+adapters, typically the onboard chip plus a USB dongle. **Exactly one adapter is
+active at a time**, and the plugin switches on its own:
 
-![Bluetooth Adapter Switch panel](panel.png)
+- plug the dongle in and it becomes the active adapter (the onboard one is turned off);
+- unplug it and the onboard adapter comes back on;
+- at login, if zero or several adapters are on, it settles on one.
+
+Prefer the onboard chip instead? Set `preferred` to `Onboard` (see Settings). A
+manual pick from the panel is kept until the adapters change again.
+
+![Bluetooth Adapter Switch panel](preview.png)
 
 Click the widget to open a panel that lists every adapter: what it is
 (**Onboard** chip or **USB dongle**), its model, whether it is active, and what
@@ -15,7 +22,7 @@ warns you which connected devices the switch would drop.
 |---|---|
 | Left click | Open the panel (or switch to the next adapter, see `clickAction`) |
 | Scroll / middle click | Make the next adapter the only powered one |
-| Right click | Unblock and power on every adapter (not in the panel) |
+| Right click | Go back to the automatic choice (the preferred adapter) |
 | Hover | Lists every adapter with its type and state |
 
 Every paired device is listed under its adapter, with its battery level when
@@ -36,25 +43,33 @@ switch adapter or when the panel closes.
 Panel keys: `↑`/`↓` or `j`/`k` move, `Enter` selects, `1`-`9` pick an adapter
 directly, `S` scans for new devices, `R` refreshes, `Esc` closes.
 
-The bar label shows the active adapter (`USB`, `Onboard`), `all` when several
-are on, or `off` when none is. After a switch you get a desktop notification,
+The bar label shows the active adapter (`USB`, `Onboard`) or `off` when none is. After a switch you get a desktop notification,
 and a failed switch is shown in the panel instead of failing silently. With a
 single adapter the widget is dimmed and does nothing.
 
 ## How it works
 
 Switching to an adapter powers it on and soft-blocks every other Bluetooth
-adapter with `rfkill`. Nothing runs as root: `/dev/rfkill` is writable by the
-logged-in user through the logind ACL, and BlueZ accepts `Powered` changes from
-an active session. The plugin never uses `sudo`, `pkexec`, udev rules or systemd
-units, and it does not touch any file outside its own directory.
+adapter with `rfkill`. Plug and unplug are noticed through `rfkill event`, which
+the plugin reads as your own user. Everything runs with your own user's
+permissions: `/dev/rfkill` is writable by the logged-in user through the logind
+ACL, and BlueZ accepts `Powered` changes from an active session. The plugin needs
+no elevated rights, installs no system files and does not touch anything outside
+its own directory (apart from its log, see Logs).
 
 Because the block is an rfkill soft block, `systemd-rfkill` restores it at boot,
-so your choice survives a reboot.
+so your choice survives a reboot. The target adapter is powered on first and the
+others are only turned off once it is up, so a failed switch never leaves you
+with no adapter, and unplugging the active dongle turns the onboard adapter back
+on.
+
+Adapter type comes from sysfs: a USB device flagged `fixed` is reported as
+onboard, a `removable` one as a USB dongle.
 
 The logic lives in [`bt-adapter.sh`](bt-adapter.sh) (`status`, `use <hciN>`,
-`next`, `all-on`, `forget|connect|disconnect|pair <hciN> <ADDRESS>`, `scan <hciN>`, and `json` for the
-full state), which you can also run by hand.
+`next`, `auto`, `ensure`, `watch`, `forget|connect|disconnect|pair <hciN> <ADDRESS>`,
+`scan <hciN>`, `audio <ADDRESS>`, `log`, and `json` for the full state), which
+you can also run by hand.
 
 ## Keybinding
 
@@ -103,8 +118,7 @@ Move it with `omarchy bar move io.github.cesarfilho.bluetooth-adapter-switch --s
 omarchy plugin remove io.github.cesarfilho.bluetooth-adapter-switch
 ```
 
-If an adapter is still blocked, turn everything back on first (right-click the
-widget, or `rfkill unblock bluetooth`).
+If an adapter is still blocked, unblock it first with `rfkill unblock bluetooth`.
 
 ## Settings
 
@@ -114,6 +128,7 @@ Omarchy settings panel:
 | Key | Default | Meaning |
 |---|---|---|
 | `showLabel` | `true` | Show the adapter name next to the icon |
+| `preferred` | `USB dongle` | Which adapter is active when several are present: `USB dongle` or `Onboard` |
 | `labelMode` | `Type` | `Type` shows USB / Onboard, `Adapter id` shows hci0 / hci1 |
 | `clickAction` | `Open panel` | `Open panel` or `Switch to next` on left click |
 | `scanTransport` | `Classic (headsets, speakers)` | What a scan looks for: `Classic`, `Low Energy` or `Both` |

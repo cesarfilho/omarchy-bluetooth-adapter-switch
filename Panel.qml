@@ -33,10 +33,9 @@ Panel {
   readonly property int rowCount: adapters.length
 
   readonly property string heroMeta: {
-    if (busy) return pending === "all" ? "Turning everything on…" : "Switching adapter…"
+    if (busy) return pending === "auto" ? "Choosing automatically…" : "Switching adapter…"
     if (!hostWidget || !hostWidget.loaded) return "Reading adapters…"
     if (adapters.length === 0) return "No adapter found"
-    if (poweredCount > 1) return "All adapters on"
     if (active) return "Using " + hostWidget.nameFor(active)
     return "No adapter active"
   }
