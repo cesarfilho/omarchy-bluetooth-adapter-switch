@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.cesarfilho.bluetooth-adapter-switch",
   "name": "Bluetooth Adapter Switch",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "author": "cesarfilho",
   "license": "MIT",
   "description": "Switch between the onboard Bluetooth adapter and a USB dongle from the bar, keeping exactly one active (a plugged-in dongle takes over automatically). A panel shows each adapter and its devices: connect, pair, forget, battery, scan, and the sound follows the headset.",
@@ -19,7 +19,7 @@
     "allowMultiple": false,
     "defaultSection": "right",
     "defaults": {
-      "showLabel": true,
+      "showLabel": false,
       "refreshIntervalSec": 10,
       "labelMode": "Type",
       "clickAction": "Open panel",
@@ -33,7 +33,7 @@
         "key": "showLabel",
         "type": "boolean",
         "label": "Show adapter name next to the icon",
-        "defaultValue": true
+        "defaultValue": false
       },
       {
         "key": "preferred",

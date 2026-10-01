@@ -44,7 +44,7 @@ BarWidget {
   property bool ensureRun: false
 
   readonly property string helper: decodeURIComponent(String(Qt.resolvedUrl("bt-adapter.sh")).replace(/^file:\/\//, ""))
-  readonly property bool showLabel: !vertical && setting("showLabel", true) !== false
+  readonly property bool showLabel: !vertical && setting("showLabel", false) === true
   readonly property string labelMode: String(setting("labelMode", "Type"))
   readonly property string preferKind: String(setting("preferred", "USB dongle")) === "Onboard" ? "onboard" : "usb"
   readonly property string clickAction: String(setting("clickAction", "Open panel"))
@@ -79,27 +79,23 @@ BarWidget {
     return labelFor(active)
   }
 
-  readonly property string barTooltip: {
-    if (lastError !== "") return lastError
-    if (!loaded) return "Bluetooth adapters"
-    if (adapters.length === 0) return "No Bluetooth adapter found"
-    var lines = ["Bluetooth adapters"]
-    for (var i = 0; i < adapters.length; i++) {
-      var a = adapters[i]
-      lines.push(rowMark(a) + " " + nameFor(a) + "  " + a.hci + "  [" + stateOf(a) + "]")
-    }
-    // Battery of connected devices, so it is visible without opening the panel.
-    for (var j = 0; j < adapters.length; j++) {
-      var devs = adapters[j].devices || []
-      for (var k = 0; k < devs.length; k++)
-        if (devs[k].connected && devs[k].battery !== null && devs[k].battery !== undefined)
-          lines.push(devs[k].name + "  " + devs[k].battery + "%")
-    }
-    lines.push(switchable
-      ? "Click: choose · Scroll: next · Right-click: automatic"
-      : "Plug in a second adapter to switch")
-    return lines.join("\n")
+  // Hover card (HoverCard.qml): shown after the pointer rests on the icon for a
+  // moment, hidden while the click panel is open since the panel shows the same.
+  readonly property bool hovering: button.tooltipHovered
+  property bool hoverReady: false
+  readonly property bool hoverOpen: hoverReady && hovering && !panelOpen
+
+  onHoveringChanged: {
+    hoverReady = false
+    if (hovering) hoverTimer.restart()
+    else hoverTimer.stop()
   }
+  onPanelOpenChanged: {
+    hoverReady = false
+    if (!panelOpen && hovering) hoverTimer.restart()
+  }
+
+  Timer { id: hoverTimer; interval: 350; onTriggered: root.hoverReady = true }
 
   // ---- naming -------------------------------------------------------------
 
@@ -125,9 +121,6 @@ BarWidget {
     if (labelMode === "Adapter id" || a.kind === "other" || sameKindCount(a) > 1) return a.hci
     return a.kind === "usb" ? "USB" : "Onboard"
   }
-
-  function stateOf(a) { return a.blocked || !a.powered ? "off" : "on" }
-  function rowMark(a) { return a.blocked || !a.powered ? "○" : "●" }
 
   // ---- data ---------------------------------------------------------------
 
@@ -315,7 +308,17 @@ BarWidget {
     if ("hostWidget" in target) target.hostWidget = root
   }
 
-  onBarChanged: injectPanel()
+  function injectHover() {
+    var target = hoverLoader.item
+    if (!target) return
+    target.bar = root.bar
+    target.anchorItem = button
+    target.host = root
+  }
+
+  Binding { target: hoverLoader.item; property: "open"; value: root.hoverOpen; when: hoverLoader.item !== null }
+
+  onBarChanged: { injectPanel(); injectHover() }
   onSettingsChanged: injectPanel()
 
   implicitWidth: button.implicitWidth
@@ -327,6 +330,13 @@ BarWidget {
     source: Qt.resolvedUrl("Panel.qml")
     visible: false
     onLoaded: root.injectPanel()
+  }
+
+  Loader {
+    id: hoverLoader
+    active: true
+    source: Qt.resolvedUrl("HoverCard.qml")
+    onLoaded: root.injectHover()
   }
 
   Process {
@@ -420,7 +430,8 @@ BarWidget {
     active: root.panelOpen
     useActiveColor: false
     dimmed: root.adapters.length < 2 || root.busy
-    tooltipText: root.barTooltip
+    // The shell's own tooltip only draws plain text; HoverCard replaces it.
+    tooltipText: ""
     onPressed: function(b) { root.triggerPress(b) }
     onWheelMoved: function(delta) { root.next() }
   }

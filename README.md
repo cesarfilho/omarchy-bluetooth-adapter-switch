@@ -47,7 +47,10 @@ immediate rather than waiting for the next poll.
 
 ![Bar widget](docs/bar.png)
 
-The label says which adapter is active: `USB` (a removable dongle), `Onboard`
+By default the bar shows only the Bluetooth icon: it is dimmed when there is
+nothing to switch, a spinner while a switch is in progress, and crossed out when
+no adapter is on. Hover for the current state, click for the panel. Turn on
+`showLabel` to add a text label that says which adapter is active: `USB` (a removable dongle), `Onboard`
 (a fixed chip), the raw `hci0`/`hci1` when two adapters are of the same type or
 when `labelMode` is `Adapter id`, `off` when none is on, and `…` while a switch
 is in progress (the icon turns into a spinner too). On a vertical bar only the
@@ -202,7 +205,7 @@ Omarchy settings panel:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `showLabel` | `true` | Show the adapter name next to the icon |
+| `showLabel` | `false` | Show the adapter name next to the icon (the bar shows only the icon by default) |
 | `preferred` | `USB dongle` | Which adapter is active when several are present: `USB dongle` or `Onboard` |
 | `labelMode` | `Type` | `Type` shows USB / Onboard, `Adapter id` shows hci0 / hci1 |
 | `clickAction` | `Open panel` | `Open panel` or `Switch to next` on left click |
