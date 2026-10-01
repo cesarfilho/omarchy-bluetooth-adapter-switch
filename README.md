@@ -29,6 +29,12 @@ one on:
   turned off.
 - **Unplug it** and the onboard adapter comes back on.
 - **At login**, if zero or several adapters are on, it settles on one.
+- **Turned Bluetooth off on purpose** (the rfkill key, `bluetoothctl power off`)?
+  By default one adapter is switched back on. Set `keepOneOn` to `false` to
+  leave it off; the plugin then only steps in when several adapters are on.
+- **A failed attempt is not retried in a loop:** after the automatic correction
+  fails (an adapter that is hard-blocked, for example) it waits a minute before
+  trying again.
 - **Anything that turns a second adapter on** (another Bluetooth tool, for
   example) is corrected on the next read, within a few seconds.
 
@@ -128,6 +134,9 @@ appears, the log says so.
   it on, bring it close and make sure no other device is connected to it*. It
   has a dismiss button, disappears by itself after 12 seconds, and points to the
   log for details.
+- When a device pairs but the first connection fails, the banner says
+  *Paired, but could not connect* and the reason, instead of reporting a failed
+  pair.
 - Specific hints cover a device that is out of range, a connection attempt that
   is still running, a device BlueZ no longer knows, and a Low Energy-only
   pairing that can never carry audio.
@@ -140,7 +149,8 @@ outcome and duration. When an action fails, the log also gets a snapshot to
 diagnose it: the rfkill state, the adapters, every BlueZ property of the device
 involved (paired, trusted, connected, UUIDs, signal…) and the latest
 `bluetoothd` messages. Polling is not logged, and the file rotates at 256 KB,
-keeping one previous copy. The widget itself logs to the shell journal.
+keeping one previous copy. The log holds device addresses, so the folder and
+file are readable by you only. The widget itself logs to the shell journal.
 
 ```bash
 bash ~/.config/omarchy/plugins/io.github.cesarfilho.bluetooth-adapter-switch/bt-adapter.sh log 80
@@ -197,6 +207,7 @@ Omarchy settings panel:
 | `labelMode` | `Type` | `Type` shows USB / Onboard, `Adapter id` shows hci0 / hci1 |
 | `clickAction` | `Open panel` | `Open panel` or `Switch to next` on left click |
 | `scanTransport` | `Classic (headsets, speakers)` | What a scan looks for: `Classic`, `Low Energy` or `Both` |
+| `keepOneOn` | `true` | Switch an adapter back on when all of them are off; `false` lets you turn Bluetooth off completely |
 | `notify` | `true` | Desktop notification after each action |
 | `refreshIntervalSec` | `10` | How often the state is re-read (2 to 120); 2 s while the panel is open |
 
@@ -264,6 +275,18 @@ because BlueZ stops a discovery when the process that asked for it exits.
 - **No battery shown.** The device does not report one over Bluetooth.
 - **Something failed and the banner is gone.** Read the log, see
   [Logs](#8-logs-for-diagnosing-problems).
+
+## Development
+
+`tests/test.sh` checks the logic that does not need hardware (the JSON the
+widget reads, the adapter-info cache, the log permissions and the mapping of
+BlueZ errors to messages) with `rfkill`, `busctl` and sysfs replaced by stubs.
+CI runs it together with ShellCheck and `.github/scripts/validate.sh`.
+
+```bash
+tests/test.sh
+.github/scripts/validate.sh
+```
 
 ## Dependencies
 

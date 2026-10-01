@@ -31,7 +31,10 @@ jobs:
         run: .github/scripts/validate.sh
 
       - name: ShellCheck
-        run: shellcheck bt-adapter.sh .github/scripts/validate.sh
+        run: shellcheck bt-adapter.sh .github/scripts/validate.sh tests/test.sh
+
+      - name: Tests
+        run: tests/test.sh
 
       - name: Note when a pull request does not bump the version
         if: github.event_name == 'pull_request'

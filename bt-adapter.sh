@@ -41,11 +41,12 @@ LOG=$STATE_DIR/plugin.log
 
 log() { # <LEVEL> <message...>
   local level=$1; shift
-  mkdir -p "$STATE_DIR" 2>/dev/null || return 0
+  # The log holds device addresses and bluetoothd output: owner-only.
+  (umask 077; mkdir -p "$STATE_DIR" 2>/dev/null) || return 0
   if [[ -f $LOG ]] && (( $(stat -c %s "$LOG" 2>/dev/null || echo 0) > 262144 )); then
     mv -f "$LOG" "$LOG.1" 2>/dev/null
   fi
-  printf '%s %-5s [%s] %s\n' "$(date '+%F %T')" "$level" "$$" "$*" >>"$LOG" 2>/dev/null
+  (umask 077; printf '%s %-5s [%s] %s\n' "$(date '+%F %T')" "$level" "$$" "$*" >>"$LOG") 2>/dev/null
   return 0
 }
 
@@ -83,7 +84,35 @@ valid_adapter() { adapters | grep -qx -- "$1"; }
 
 # Where the adapter is attached: "onboard" (soldered USB/PCIe chip), "usb" (a
 # removable dongle) or "other". Read from sysfs, so it needs no privileges.
+adapter_key() { # <hci> -> "sysfs path|vendor:product"; changes when another adapter takes the name
+  local dev usb ids=""
+  dev=$(readlink -f "/sys/class/bluetooth/$1/device" 2>/dev/null) || return 0
+  [[ -n $dev ]] || return 0
+  usb=$dev
+  while [[ -n $usb && $usb != / && ! -f $usb/idVendor ]]; do usb=$(dirname "$usb"); done
+  [[ -f $usb/idVendor ]] && ids=$(cat "$usb/idVendor" "$usb/idProduct" 2>/dev/null | paste -sd:)
+  printf '%s|%s\n' "$dev" "$ids"
+}
+
+# What an adapter is never changes while it stays plugged in, but working it out
+# costs udevadm, sed and awk, and the widget polls every few seconds. The answer
+# is cached per hciN, keyed by sysfs path plus USB vendor:product, so a replug into another port or
+# a different dongle under the same name is looked up again.
 adapter_info() { # <hci> -> kind<TAB>model
+  local key cache=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-bluetooth-adapter-switch/info-$1 cached info
+  key=$(adapter_key "$1")
+  if [[ -n $key && -r $cache ]]; then
+    { read -r cached; IFS= read -r info; } <"$cache"
+    [[ $cached == "$key" && -n $info ]] && { printf '%s\n' "$info"; return 0; }
+  fi
+  info=$(adapter_info_read "$1")
+  if [[ -n $key && -n $info ]]; then
+    mkdir -p "${cache%/*}" 2>/dev/null && printf '%s\n%s\n' "$key" "$info" >"$cache" 2>/dev/null
+  fi
+  printf '%s\n' "$info"
+}
+
+adapter_info_read() { # <hci> -> kind<TAB>model, straight from sysfs/udev
   local dev usb kind=other removable vendor model props
   dev=$(readlink -f "/sys/class/bluetooth/$1/device" 2>/dev/null) || return 0
   usb=$dev
@@ -185,7 +214,7 @@ active() { # first powered, unblocked adapter
 }
 
 next() {
-  local list current hci pick=""
+  local list current hci i pick=""
   mapfile -t list < <(adapters)
   (( ${#list[@]} > 1 )) || { echo "only one adapter present" >&2; exit 3; }
   current=$(active)
@@ -227,9 +256,16 @@ ensure() {
   [[ $(active_count) == 1 ]] || auto "${1:-usb}"
 }
 
-# One line per Bluetooth rfkill event (add/remove/change).
+# One line per Bluetooth rfkill event (add/remove/change). rfkill runs as a
+# coprocess that is killed with us: in a plain pipeline it would outlive a
+# killed shell until the next event made it hit a closed pipe.
 watch() {
-  rfkill event | awk '/ type 2 / { print "event"; fflush() }'
+  local line
+  coproc RF { exec rfkill event 2>/dev/null 3>&-; }
+  trap 'kill "$RF_PID" 2>/dev/null; exit 0' TERM INT
+  while read -r line <&"${RF[0]}"; do
+    [[ $line == *" type 2 "* ]] && echo event
+  done
 }
 
 # Unpair a device on the adapter that owns it. `bluetoothctl remove` only acts
@@ -331,8 +367,8 @@ disconnect() { # <hci> <address>
   dev_call "$p" Disconnect 10 || exit 1
 }
 
-pair() { # <hci> <address>
-  local p; p=$(dev_path "$1" "$2") || exit $?
+pair() { # <hci> <address>   exit 4 = paired, but the first connect failed
+  local p cerr; p=$(dev_path "$1" "$2") || exit $?
   adapter_on "$1"
   if ! busctl --system get-property "$BLUEZ" "$p" org.bluez.Device1 Address >/dev/null 2>&1; then
     echo "the device is no longer visible. Put it in pairing mode (headsets: hold the button until the light flashes) and scan again" >&2
@@ -341,7 +377,10 @@ pair() { # <hci> <address>
   dev_call "$p" Pair 40 || exit 1
   # Trusted lets the device reconnect by itself next time.
   busctl --system set-property "$BLUEZ" "$p" org.bluez.Device1 Trusted b true >/dev/null 2>&1 || true
-  dev_call "$p" Connect 15 || true
+  if ! cerr=$(dev_call "$p" Connect 15 2>&1); then
+    echo "Paired, but could not connect: $cerr" >&2
+    exit 4
+  fi
   audio_output "$2" || true
 }
 
@@ -356,9 +395,11 @@ scan() { # <hci> [seconds] [bredr|le|auto]
   valid_adapter "$hci" || { echo "unknown adapter: $hci" >&2; exit 2; }
   adapter_on "$hci"
   addr=$(prop "$hci" Address)
-  coproc BT { exec bluetoothctl >/dev/null 2>&1; }
+  coproc BT { exec bluetoothctl >/dev/null 2>&1 3>&-; }
   local fd=${BT[1]}
-  stop() { { printf 'scan off\nquit\n' 1>&"$fd"; } 2>/dev/null; kill "${sleeper:-0}" 2>/dev/null; }
+  # Never `kill 0`: with no sleeper yet that signals the whole process group,
+  # which is the shell that launched us.
+  stop() { { printf 'scan off\nquit\n' 1>&"$fd"; } 2>/dev/null; [[ -n ${sleeper:-} ]] && kill "$sleeper" 2>/dev/null; return 0; }
   trap 'stop; wait "$BT_PID" 2>/dev/null; exit 0' TERM INT
   case $transport in bredr|le|auto) ;; *) transport=bredr ;; esac
   printf 'select %s\nmenu scan\ntransport %s\nback\nscan on\n' "$addr" "$transport" >&"$fd"
@@ -391,9 +432,9 @@ diagnose() { # <the failed command line...>
 on_action_exit() {
   local rc=$? ms err
   trap - EXIT
-  sleep 0.1 # let the stderr copy reach the file
   ms=$(( ($(date +%s%N) - ACTION_START_NS) / 1000000 ))
   err=$(tr '\n' ' ' <"$ACTION_ERRFILE" 2>/dev/null)
+  cat "$ACTION_ERRFILE" >&3 2>/dev/null # hand the collected stderr to the caller
   rm -f "$ACTION_ERRFILE"
   if (( rc == 0 )); then
     log INFO "ok: $ACTION_ARGS (${ms}ms)${err:+ stderr: $err}"
@@ -403,6 +444,9 @@ on_action_exit() {
   fi
 }
 
+# Sourced (by tests/test.sh) only to get the functions above.
+[[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
+
 case ${1:-} in
   use|next|auto|ensure|forget|connect|disconnect|pair|scan|audio)
     ACTION_ARGS=$*
@@ -410,7 +454,11 @@ case ${1:-} in
     ACTION_START_NS=$(date +%s%N)
     ACTION_ERRFILE=$(mktemp)
     log INFO "run: $ACTION_ARGS"
-    exec 2> >(tee -a "$ACTION_ERRFILE" >&2)
+    # stderr goes to a file while the action runs and is replayed to the real
+    # stderr (fd 3) on exit, once the file is complete. Long-lived children
+    # close fd 3 so they cannot hold the caller's pipe open. A SIGKILL skips the
+    # EXIT trap, so the text is lost then; the log still has the "run:" line.
+    exec 3>&2 2>>"$ACTION_ERRFILE"
     trap on_action_exit EXIT
     ;;
 esac

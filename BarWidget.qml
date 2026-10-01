@@ -37,6 +37,11 @@ BarWidget {
   property string failPrefix: ""
   // The hciN currently looking for devices ("" when not scanning).
   property string scanning: ""
+  // When the last automatic "ensure" failed (ms since epoch), 0 if it has not.
+  property double ensureFailedAt: 0
+  readonly property int ensureRetryMs: 60000
+  // True while the running action is settle()'s "ensure" (only that one backs off).
+  property bool ensureRun: false
 
   readonly property string helper: decodeURIComponent(String(Qt.resolvedUrl("bt-adapter.sh")).replace(/^file:\/\//, ""))
   readonly property bool showLabel: !vertical && setting("showLabel", true) !== false
@@ -47,6 +52,7 @@ BarWidget {
     var v = String(setting("scanTransport", "Classic (headsets, speakers)"))
     return v.indexOf("Low Energy") === 0 ? "le" : (v.indexOf("Both") === 0 ? "auto" : "bredr")
   }
+  readonly property bool keepOneOn: setting("keepOneOn", true) !== false
   readonly property bool notifyOnSwitch: setting("notify", true) !== false
   readonly property int refreshMs: Math.max(2, Number(setting("refreshIntervalSec", 10))) * 1000
 
@@ -141,7 +147,9 @@ BarWidget {
 
   // Keep exactly one adapter active. A change in the set of adapters (dongle
   // plugged or unplugged) re-applies the preference; anything else only steps
-  // in when zero or several adapters are on.
+  // in when several adapters are on (or none, if "Turn one back on" is set).
+  // After a failed attempt it waits ensureRetryMs before trying again, so a
+  // blocked or missing adapter does not turn into a retry loop.
   function settle() {
     var ready = []
     for (var i = 0; i < adapters.length; i++)
@@ -150,12 +158,24 @@ BarWidget {
     if (ready.length !== adapters.length) return
     // Mid-switch: leave knownSet alone so the change is still seen afterwards.
     if (busy) return
+    // An empty read (rfkill hiccup, last adapter unplugged) must not wipe
+    // knownSet, or the adapters coming back would not count as a change.
+    if (ready.length === 0) return
     var set = ready.join(",")
     var changed = knownSet !== "" && set !== knownSet
+    if (changed) {
+      // Everything off on purpose and "turn one back on" disabled: respect it.
+      // Otherwise remember the new set only once the switch really started, so
+      // a change that could not be applied is seen again on the next read.
+      if ((poweredCount === 0 && !keepOneOn) || automatic()) knownSet = set
+      return
+    }
     knownSet = set
-    if (ready.length === 0) return
-    if (changed) automatic()
-    else if (poweredCount !== 1) run(["ensure", preferKind], "auto", "Could not switch")
+    if ((poweredCount > 1 || (poweredCount === 0 && keepOneOn)) &&
+        Date.now() - ensureFailedAt > ensureRetryMs) {
+      ensureRun = true
+      run(["ensure", preferKind], "auto", "Could not switch")
+    }
   }
 
   function refresh() {
@@ -165,10 +185,12 @@ BarWidget {
 
   // ---- actions ------------------------------------------------------------
 
+  // Returns true when the action was started, false when it was ignored.
   function run(args, target, failText) {
     if (busy) {
+      ensureRun = false
       console.log("[bt-adapter-switch] ignored " + args.join(" ") + ": another action is running")
-      return
+      return false
     }
     console.log("[bt-adapter-switch] run " + args.join(" "))
     busy = true
@@ -177,9 +199,14 @@ BarWidget {
     if (failText !== undefined) { doneMessage = ""; failPrefix = failText }
     actionProc.command = ["bash", helper].concat(args)
     actionProc.running = true
+    return true
   }
 
+  // Every action checks `busy` before it touches doneMessage, failPrefix or the
+  // scan: those belong to the action that is already running, and a stray
+  // scroll or click must not rewrite its notification or error text.
   function use(hci) {
+    if (busy) return
     // Already the only active adapter: nothing to do.
     if (active && active.hci === hci && poweredCount === 1) return
     stopScan()
@@ -187,24 +214,38 @@ BarWidget {
     failPrefix = "Could not switch"
     run(["use", hci], hci)
   }
-  function next() { if (switchable) { stopScan(); doneMessage = ""; failPrefix = "Could not switch"; run(["next"], "next") } }
-  function automatic() { stopScan(); run(["auto", preferKind], "auto", "Could not switch") }
+  function next() {
+    if (busy || !switchable) return
+    stopScan()
+    doneMessage = ""
+    failPrefix = "Could not switch"
+    run(["next"], "next")
+  }
+  function automatic() {
+    if (busy) return false
+    stopScan()
+    return run(["auto", preferKind], "auto", "Could not switch")
+  }
   function forget(hci, address, name) {
+    if (busy) return
     doneMessage = "Forgot " + name
     failPrefix = "Could not forget " + name
     run(["forget", hci, address], "dev:" + address)
   }
   function connectDevice(hci, d) {
+    if (busy) return
     doneMessage = "Connected to " + d.name
     failPrefix = "Could not connect to " + d.name
     run(["connect", hci, d.address], "dev:" + d.address)
   }
   function disconnectDevice(hci, d) {
+    if (busy) return
     doneMessage = "Disconnected " + d.name
     failPrefix = "Could not disconnect " + d.name
     run(["disconnect", hci, d.address], "dev:" + d.address)
   }
   function pairDevice(hci, d) {
+    if (busy) return
     doneMessage = "Paired with " + d.name
     failPrefix = "Could not pair with " + d.name
     run(["pair", hci, d.address], "dev:" + d.address)
@@ -303,6 +344,9 @@ BarWidget {
     stderr: StdioCollector { id: actionErr; waitForEnd: true }
     onExited: function(exitCode) {
       console.log("[bt-adapter-switch] exit " + exitCode + (exitCode === 0 ? "" : ": " + String(actionErr.text).trim()))
+      // Remember a failed automatic attempt so settle() backs off.
+      if (root.ensureRun) root.ensureFailedAt = exitCode === 0 ? 0 : Date.now()
+      root.ensureRun = false
       root.busy = false
       root.pending = ""
       if (exitCode === 0 && root.doneMessage !== "") {
@@ -311,7 +355,11 @@ BarWidget {
         root.announceNext = true
       } else {
         var why = String(actionErr.text).trim()
-        root.lastError = (root.failPrefix !== "" ? root.failPrefix : "Action failed") + ": " + (why !== "" ? why : "exit code " + exitCode) + "\nDetails: ~/.local/state/omarchy-bluetooth-adapter-switch/plugin.log"
+        // Exit 4 from "pair": paired fine, only the connect failed. The helper's
+        // message already says so, so the "Could not pair" prefix would mislead.
+        var pairedOnly = exitCode === 4 && why !== "" && root.failPrefix.indexOf("Could not pair") === 0
+        var head = pairedOnly ? "" : (root.failPrefix !== "" ? root.failPrefix : "Action failed") + ": "
+        root.lastError = head + (why !== "" ? why : "exit code " + exitCode) + "\nDetails: ~/.local/state/omarchy-bluetooth-adapter-switch/plugin.log"
         if (root.notifyOnSwitch) {
           notifyProc.command = ["notify-send", "-u", "critical", "-a", "Bluetooth Adapter Switch",
                                 "-i", "dialog-error", "Bluetooth adapter", root.lastError]
