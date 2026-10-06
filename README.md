@@ -38,10 +38,26 @@ one on:
 - **Anything that turns a second adapter on** (another Bluetooth tool, for
   example) is corrected on the next read, within a few seconds.
 
-Prefer the onboard chip? Set `preferred` to `Onboard` (see [Settings](#settings)).
+Prefer the onboard chip? Set `preferred` to `Onboard`, or to `Last used` to
+follow the adapter your last device was connected through (see
+[Settings](#settings)).
 A manual pick from the panel is respected until the set of adapters changes
 again. Plug and unplug are noticed through `rfkill event`, so the reaction is
 immediate rather than waiting for the next poll.
+
+#### Failover and reconnect
+
+The plugin remembers which devices you have connected (a device you disconnect
+or forget is dropped from that list). When another adapter becomes the active
+one, whether you switched, the dongle was unplugged or Bluetooth was switched
+off and back on, it reconnects those devices that are **paired to the new
+adapter**, moves the sound to the headset and says so in a notification. A
+device that is switched off just stays disconnected. A device is only known to
+the adapter it was paired with, so pair a headset on both adapters if you want
+it to follow you across a failover. Turn it off with `autoReconnect`.
+
+Connecting a device that belongs to an adapter that is off switches to that
+adapter first, then connects.
 
 ### 2. The bar widget
 
@@ -87,12 +103,18 @@ Paired devices are listed under the adapter they belong to.
 - **Connect / disconnect** with the device's switch (or by clicking the line).
   The switch is disabled on an adapter that is off, with a tooltip saying to
   switch to it first. A connect that gets no answer is cancelled after 15
-  seconds so the next attempt starts clean.
+  seconds (`connectTimeoutSec`) so the next attempt starts clean.
 - **Battery** appears next to the name (icon and percentage) when the device
-  reports one through BlueZ, turning red and bold at 20% or less. Connected
+  reports one through BlueZ, turning red and bold at the alert level (20% or less by default). Connected
   devices' batteries are also listed in the bar tooltip. Many earbuds do not
   report a level over Bluetooth; in that case nothing is shown rather than a
   made-up value.
+- **Music or call mode:** for a connected headset that offers both, a button
+  switches between music quality (A2DP) and call mode with the microphone
+  (HFP), or press `M`. The sound stays on the headset.
+- **Low battery:** one notification when a connected device drops to the
+  threshold (`batteryAlert`, 20% by default; `0` turns the notification off),
+  and again only after it has recovered.
 - **Forget** (the trash button, visible when you point at the line) unpairs the
   device **on that adapter**. It asks for a second click within four seconds,
   because unpairing means pairing again from scratch. It works for a device
@@ -158,6 +180,13 @@ involved (paired, trusted, connected, UUIDs, signal…) and the latest
 keeping one previous copy. The log holds device addresses, so the folder and
 file are readable by you only. The widget itself logs to the shell journal.
 
+**Copy diagnostics** (the `D` key in the panel, or `bt-adapter.sh diagnostics
+--copy`) puts a report on the clipboard to paste into a bug report: plugin,
+kernel, BlueZ and audio server versions, the adapters, how many devices are
+paired and connected, rfkill, the last lines of the log and the recent
+`bluetoothd` journal. Device names are left out and every Bluetooth address is
+masked to its vendor part (`F4:9D:8A:XX:XX:XX`).
+
 ```bash
 bash ~/.config/omarchy/plugins/io.github.cesarfilho.bluetooth-adapter-switch/bt-adapter.sh log 80
 journalctl -b | grep bt-adapter-switch
@@ -166,7 +195,8 @@ journalctl -b | grep bt-adapter-switch
 ### 9. Keyboard and keybinding
 
 In the panel: `↑`/`↓` or `j`/`k` move, `Enter` selects, `1`-`9` pick an adapter
-directly, `S` scans, `R` refreshes, `Tab` moves to the next bar panel and `Esc`
+directly, `S` scans, `M` switches a headset between music and call mode,
+`D` copies a diagnostics report, `R` refreshes, `Tab` moves to the next bar panel and `Esc`
 closes. The panel also answers to Omarchy's shell IPC, so you can bind it to a
 key in Hyprland:
 
@@ -209,11 +239,15 @@ Omarchy settings panel:
 | Key | Default | Meaning |
 |---|---|---|
 | `showLabel` | `false` | Show the adapter name next to the icon (the bar shows only the icon by default) |
-| `preferred` | `USB dongle` | Which adapter is active when several are present: `USB dongle` or `Onboard` |
+| `preferred` | `USB dongle` | Which adapter is active when several are present: `USB dongle`, `Onboard` or `Last used` |
 | `labelMode` | `Type` | `Type` shows USB / Onboard, `Adapter id` shows hci0 / hci1 |
 | `clickAction` | `Open panel` | `Open panel` or `Switch to next` on left click |
 | `scanTransport` | `Classic (headsets, speakers)` | What a scan looks for: `Classic`, `Low Energy` or `Both` |
 | `keepOneOn` | `true` | Switch an adapter back on when all of them are off; `false` lets you turn Bluetooth off completely |
+| `autoReconnect` | `true` | Reconnect the devices you had connected after another adapter becomes active |
+| `batteryAlert` | `20` | Notify once and show red at or below this battery level (0 to 50); `0` turns the notification off |
+| `connectTimeoutSec` | `15` | How long to wait for a device to answer a connect or pair (5 to 60) |
+| `errorDismissSec` | `12` | How long an error stays in the panel (3 to 60) |
 | `notify` | `true` | Desktop notification after each action |
 | `refreshIntervalSec` | `10` | How often the state is re-read (2 to 120); 2 s while the panel is open |
 
@@ -228,14 +262,18 @@ you can also run by hand:
 | `json` | Full state as JSON: type, model, paired devices with battery, nearby devices |
 | `use <hciN>` | Make that adapter the only active one |
 | `next` | Make the next adapter the active one |
-| `auto [usb\|onboard]` | Make the preferred adapter the only active one |
-| `ensure [usb\|onboard]` | Like `auto`, but only when zero or several are active |
+| `auto [usb\|onboard\|last]` | Make the preferred adapter the only active one |
+| `ensure [usb\|onboard\|last]` | Like `auto`, but only when zero or several are active |
 | `watch` | Print a line on every adapter plug, unplug or state change |
 | `connect` / `disconnect <hciN> <ADDRESS>` | Connect or disconnect a paired device (connect also moves the sound) |
 | `pair <hciN> <ADDRESS>` | Pair, trust and connect a device |
 | `forget <hciN> <ADDRESS>` | Unpair a device from that adapter |
 | `scan <hciN> [seconds] [bredr\|le\|auto]` | Look for devices until stopped (default 45 s, classic) |
 | `audio <ADDRESS>` | Make a connected device the default audio output |
+| `profile <ADDRESS> [toggle\|a2dp\|hfp]` | Switch a headset between music and call mode |
+| `switch-connect <hciN> <ADDRESS>` | Switch to that adapter if needed, then connect |
+| `reconnect <hciN>` | Reconnect the devices that were connected before the adapter changed |
+| `diagnostics [--copy]` | Anonymised report (versions, adapters, log, journal); `--copy` puts it on the clipboard |
 | `log [lines]` | Show the end of the plugin log |
 
 ## How it works
@@ -245,7 +283,8 @@ adapter with `rfkill`. Everything runs with your own user's permissions:
 `/dev/rfkill` is writable by the logged-in user through the logind ACL, and
 BlueZ accepts property changes from an active session. The plugin needs no
 elevated rights, installs no system files and does not touch anything outside
-its own directory (apart from its log).
+its own directory (apart from its log and `profiles.json`, next to it, which
+holds the devices to reconnect and the adapter last used, by Bluetooth address).
 
 Because the block is an rfkill soft block, `systemd-rfkill` restores it at boot,
 so your choice survives a reboot. The target adapter is powered on first, with

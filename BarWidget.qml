@@ -47,11 +47,22 @@ BarWidget {
   readonly property int ensureRetryMs: 60000
   // True while the running action is settle()'s "ensure" (only that one backs off).
   property bool ensureRun: false
+  // Address of the adapter in use on the previous read, and whether the devices
+  // that were connected before a change of adapter still have to be reconnected.
+  property string activeAddr: ""
+  property bool reconnectWanted: false
+  // Every adapter was off on a read since activeAddr was set (Bluetooth switched off and back on).
+  property bool wasOff: false
+  // Addresses already warned about a low battery (until it recovers).
+  property var batteryWarned: ({})
 
   readonly property string helper: decodeURIComponent(String(Qt.resolvedUrl("bt-adapter.sh")).replace(/^file:\/\//, ""))
   readonly property bool showLabel: !vertical && setting("showLabel", false) === true
   readonly property string labelMode: String(setting("labelMode", "Type"))
-  readonly property string preferKind: String(setting("preferred", "USB dongle")) === "Onboard" ? "onboard" : "usb"
+  readonly property string preferKind: {
+    var v = String(setting("preferred", "USB dongle"))
+    return v === "Onboard" ? "onboard" : (v === "Last used" ? "last" : "usb")
+  }
   readonly property string clickAction: String(setting("clickAction", "Open panel"))
   readonly property string scanTransport: {
     var v = String(setting("scanTransport", "Classic (headsets, speakers)"))
@@ -59,6 +70,12 @@ BarWidget {
   }
   readonly property bool keepOneOn: setting("keepOneOn", true) !== false
   readonly property bool notifyOnSwitch: setting("notify", true) !== false
+  readonly property bool autoReconnect: setting("autoReconnect", true) !== false
+  // Battery percentage at or below which a device is flagged; 0 turns the alert off.
+  readonly property int batteryAlertPct: Math.max(0, Math.min(50, Number(setting("batteryAlert", 20))))
+  readonly property int lowBatteryLevel: batteryAlertPct > 0 ? batteryAlertPct : 20
+  readonly property int connectTimeoutSec: Math.max(5, Math.min(60, Number(setting("connectTimeoutSec", 15))))
+  readonly property int errorDismissMs: Math.max(3, Number(setting("errorDismissSec", 12))) * 1000
   readonly property int refreshMs: Math.max(2, Number(setting("refreshIntervalSec", 10))) * 1000
 
   readonly property var panelItem: panelLoader.item
@@ -141,6 +158,53 @@ BarWidget {
     if (announceNext) { announceNext = false; announce() }
     if (refreshQueued) { refreshQueued = false; refresh() }
     settle()
+    trackActive()
+    checkBattery()
+  }
+
+  // A different adapter became the active one (a switch, a dongle unplugged, or
+  // Bluetooth switched back on): bring back the devices that were connected.
+  // The very first read only records the adapter, so starting the shell never
+  // reconnects anything by itself.
+  function trackActive() {
+    var addr = active ? active.address : ""
+    if (addr === "") {
+      if (activeAddr !== "") wasOff = true
+    } else {
+      if (activeAddr !== "" && (addr !== activeAddr || wasOff) && autoReconnect) reconnectWanted = true
+      activeAddr = addr
+      wasOff = false
+    }
+    if (reconnectWanted && !busy && active && !reconnectProc.running) {
+      reconnectWanted = false
+      reconnectProc.command = ["env", "BT_CONNECT_TIMEOUT=" + connectTimeoutSec, "bash", helper, "reconnect", active.hci]
+      reconnectProc.running = true
+    }
+  }
+
+  // One notification per device when its battery drops to the threshold, and
+  // again only after it has recovered (a few points of hysteresis).
+  function checkBattery() {
+    if (batteryAlertPct === 0) return
+    var warned = batteryWarned
+    var changed = false
+    for (var i = 0; i < adapters.length; i++) {
+      var list = adapters[i].devices
+      for (var j = 0; j < list.length; j++) {
+        var d = list[j]
+        var known = warned[d.address] === true
+        var level = d.battery === null || d.battery === undefined ? -1 : Number(d.battery)
+        if (d.connected && level >= 0 && level <= batteryAlertPct && !known) {
+          warned[d.address] = true
+          changed = true
+          notify("Battery low", d.name + " is at " + level + "%", "󰂃", "normal", true)
+        } else if (known && (!d.connected || level > batteryAlertPct + 5)) {
+          delete warned[d.address]
+          changed = true
+        }
+      }
+    }
+    if (changed) batteryWarned = warned
   }
 
   // Keep exactly one adapter active. A change in the set of adapters (dongle
@@ -195,7 +259,7 @@ BarWidget {
     pending = target
     lastError = ""
     if (failText !== undefined) { setDone("", "", "󰂯"); failPrefix = failText }
-    actionProc.command = ["bash", helper].concat(args)
+    actionProc.command = ["env", "BT_CONNECT_TIMEOUT=" + connectTimeoutSec, "bash", helper].concat(args)
     actionProc.running = true
     return true
   }
@@ -230,11 +294,32 @@ BarWidget {
     failPrefix = "Could not forget " + name
     run(["forget", hci, address], "dev:" + address)
   }
+  // Connecting a device that belongs to an adapter that is off switches to that
+  // adapter first (the other one goes off, as always).
   function connectDevice(hci, d) {
     if (busy) return
+    var owner = null
+    for (var i = 0; i < adapters.length; i++) if (adapters[i].hci === hci) owner = adapters[i]
+    var needsSwitch = owner !== null && (!owner.powered || owner.blocked || poweredCount !== 1)
+    stopScan()
     setDone("Connected", d.name, "󰂱")
     failPrefix = "Could not connect to " + d.name
-    run(["connect", hci, d.address], "dev:" + d.address)
+    run([needsSwitch ? "switch-connect" : "connect", hci, d.address], "dev:" + d.address)
+  }
+  // Music (A2DP) <-> call mode with a microphone (HFP).
+  function toggleProfile(d) {
+    if (busy) return
+    var toCall = d.profile === "a2dp"
+    setDone(toCall ? "Call mode" : "Music mode", d.name + (toCall ? ": microphone on, lower sound quality" : ": high quality sound"), toCall ? "󰋎" : "󰋋")
+    failPrefix = "Could not change the audio profile of " + d.name
+    run(["profile", d.address, toCall ? "hfp" : "a2dp"], "dev:" + d.address)
+  }
+  // Anonymised report on the clipboard, for pasting into a bug report.
+  function copyDiagnostics() {
+    if (busy) return
+    setDone("Diagnostics copied", "Paste it into your issue (device names and addresses are masked)", "󰆏")
+    failPrefix = "Could not copy the diagnostics"
+    run(["diagnostics", "--copy"], "diag")
   }
   function disconnectDevice(hci, d) {
     if (busy) return
@@ -272,8 +357,8 @@ BarWidget {
   // One toast per event, built by Omarchy's own notifier: a glyph instead of a
   // generic icon, the previous toast replaced rather than stacked, and a click
   // that opens this panel. Argument words stay separate, never one shell string.
-  function notify(headline, body, glyph, urgency) {
-    if (!notifyOnSwitch) return
+  function notify(headline, body, glyph, urgency, always) {
+    if (!notifyOnSwitch && always !== true) return
     notifyProc.command = ["omarchy-notification-send", "--app-name", "Bluetooth", "-g", glyph, "-u", urgency,
                           "-r", String(lastNotifId), "-p", headline, body,
                           "--exec", "omarchy-shell", "io.github.cesarfilho.bluetooth-adapter-switch", "open"]
@@ -397,6 +482,23 @@ BarWidget {
     }
   }
 
+  // Reconnects the devices that were connected before the adapter changed. It
+  // runs beside the user's actions rather than as one of them, so the panel
+  // stays usable while a headset that is switched off times out.
+  Process {
+    id: reconnectProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var names = String(text).trim().split("\n").filter(function(n) { return n !== "" })
+        if (names.length > 0)
+          root.notify("Reconnected", names.join(", "), "󰂱", "low")
+        root.refresh()
+      }
+    }
+  }
+
   // Plug and unplug: one line per Bluetooth adapter event, then re-read after
   // things have settled (BlueZ registers a new adapter a moment after rfkill).
   Process {
@@ -413,7 +515,7 @@ BarWidget {
   // A failure message is news for a few seconds, not a permanent banner.
   Timer {
     id: errorTimer
-    interval: 12000
+    interval: root.errorDismissMs
     onTriggered: root.lastError = ""
   }
   onLastErrorChanged: if (lastError !== "") errorTimer.restart()

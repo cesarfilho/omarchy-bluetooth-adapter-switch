@@ -37,6 +37,7 @@ adapter_key() { echo "/sys/fake/$1"; }
 adapter_info_read() { echo x >>"$INFO_COUNT"; case $1 in hci0) printf 'onboard\tIntel AX200\n' ;; *) printf 'usb\tASUS USB-BT500\n' ;; esac; }
 busctl() { printf '%s\n' "$BUSCTL_OUT"; return "$BUSCTL_RC"; }
 timeout() { shift; "$@"; }
+pactl() { echo '[{"name":"bluez_card.11_22_33_44_55_66","active_profile":"a2dp-sink","profiles":{"a2dp-sink":{},"headset-head-unit":{},"off":{}}}]'; }
 
 # ---- json ---------------------------------------------------------------
 
@@ -53,6 +54,7 @@ check "adapters in hciN order"   'hci0 hci1'        "$(jq -r '[.[].hci] | join("
 check "kind and model"           'onboard|Intel AX200|usb' "$(jq -r '"\(.[0].kind)|\(.[0].model)|\(.[1].kind)"' <<<"$out")"
 check "powered and blocked"      'true false|false true'   "$(jq -r '"\(.[0].powered) \(.[0].blocked)|\(.[1].powered) \(.[1].blocked)"' <<<"$out")"
 check "paired device + battery"  'Headset true 80 true'    "$(jq -r '.[0].devices[0] | "\(.name) \(.connected) \(.battery) \(.hasProfile)"' <<<"$out")"
+check "headset profile from the audio card" 'a2dp true' "$(jq -r '.[0].devices[0] | "\(.profile) \(.canProfile)"' <<<"$out")"
 check "no devices on hci1"       '0'                       "$(jq -r '.[1].devices | length' <<<"$out")"
 check "nearby sorted, profile first" 'Speaker Beacon'      "$(jq -r '[.[0].nearby[].name] | join(" ")' <<<"$out")"
 check "wlan device is ignored"   '2'                       "$(jq -r 'length' <<<"$out")"
@@ -87,6 +89,36 @@ check "page timeout" "the device is out of range or switched off"               
 check "not found"    "device not found on this adapter (scan and pair it first)"         "$(reason "Call failed: Method \"Connect\" doesn't exist")"
 check "silent failure explains itself" "no response from the device. Turn it on, bring it close and make sure no other device is connected to it" "$(reason '')"
 check "unknown text passes through" "Something odd" "$(reason 'Call failed: Something odd')"
+
+# ---- remembered devices -------------------------------------------------
+
+BUSCTL_OUT='{"type":"s","data":"AA:AA:AA:AA:AA:01"}' BUSCTL_RC=0
+remember_connected hci0 11:22:33:44:55:66
+remember_connected hci0 aa:bb:cc:dd:ee:ff
+remember_connected hci0 11:22:33:44:55:66
+check "last lists each device once, newest last" '11:22:33:44:55:66' "$(state_get | jq -r '.last[-1]')"
+check "last has two devices"                     '2'                 "$(state_get | jq -r '.last | length')"
+check "adapter is remembered by address"         'AA:AA:AA:AA:AA:01' "$(state_get | jq -r '.lastAdapter')"
+forget_wanted 11:22:33:44:55:66
+check "disconnect stops the reconnect"           'AA:BB:CC:DD:EE:FF' "$(state_get | jq -r '.last | join(",")')"
+forget_wanted AA:BB:CC:DD:EE:FF drop
+check "forget drops the device entry"            'null'              "$(state_get | jq -c '.devices["AA:BB:CC:DD:EE:FF"]')"
+check "profiles file is owner-only"              '600'               "$(stat -c %a "$PROFILES")"
+rm -f "$PROFILES"
+check "no state yet is an empty object"          '{}'                "$(state_get)"
+
+adapters() { printf 'hci0\nhci1\n'; }
+prop() { [[ $2 == Address ]] && { [[ $1 == hci0 ]] && echo AA:AA:AA:AA:AA:01 || echo BB:BB:BB:BB:BB:02; }; }
+check "last, nothing remembered: falls back to usb" 'hci1' "$(preferred last)"
+state_set '.lastAdapter = "AA:AA:AA:AA:AA:01"'
+check "last follows the remembered adapter"        'hci0' "$(preferred last)"
+state_set '.lastAdapter = "CC:CC:CC:CC:CC:09"'
+check "last, adapter gone: falls back to usb"      'hci1' "$(preferred last)"
+
+# ---- diagnostics privacy ------------------------------------------------
+
+check "addresses are masked" 'device F4:9D:8A:XX:XX:XX / dev_F4_9D_8A_XX:XX:XX' \
+  "$(echo 'device F4:9D:8A:98:E3:B2 / dev_F4_9D_8A_98_E3_B2' | mask_addresses)"
 
 echo "$pass passed, $failed failed"
 (( failed == 0 ))

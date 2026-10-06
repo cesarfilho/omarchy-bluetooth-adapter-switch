@@ -236,7 +236,7 @@ PopupWindow {
               required property var modelData
               readonly property bool hasBat: root.hasBattery(modelData)
               readonly property int level: hasBat ? Math.max(0, Math.min(100, Number(modelData.battery))) : 0
-              readonly property bool low: hasBat && level <= 20
+              readonly property bool low: hasBat && level <= (host ? host.lowBatteryLevel : 20)
 
               width: block.width
               height: Math.max(name.implicitHeight, gauge.height)

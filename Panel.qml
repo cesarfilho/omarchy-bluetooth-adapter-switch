@@ -12,7 +12,8 @@ import qs.Ui
 //
 // Keys: Up/Down (or j/k) move, Enter acts on the row (use adapter, connect or
 // disconnect, pair), X/Delete forgets a device, 1-9 pick an adapter directly,
-// S scans, R refreshes, Esc closes.
+// S scans, M switches a headset between music and call mode, D copies a
+// diagnostics report, R refreshes, Esc closes.
 Panel {
   id: root
   moduleName: "io.github.cesarfilho.bluetooth-adapter-switch"
@@ -215,6 +216,8 @@ Panel {
         if (k === "j") root.moveCursor(1)
         else if (k === "k") root.moveCursor(-1)
         else if (k === "x" && root.cursorRow && root.cursorRow.type === "device") root.requestForget(root.cursorRow.adapter, root.cursorRow.dev)
+        else if (k === "m" && root.cursorRow && root.cursorRow.type === "device" && root.cursorRow.dev.canProfile === true) root.hostWidget.toggleProfile(root.cursorRow.dev)
+        else if (k === "d" && root.hostWidget) root.hostWidget.copyDiagnostics()
         else if (k === "r" && root.hostWidget) root.hostWidget.refresh()
         else if (k === "s" && root.hostWidget && root.active) root.hostWidget.toggleScan(root.active.hci)
         else if (k >= "1" && k <= "9") root.pickNumber(parseInt(k, 10))
@@ -382,7 +385,8 @@ Panel {
           text: {
             var parts = ["↵ select"]
             if (root.cursorRow && root.cursorRow.type === "device") parts.push("X forget")
-            parts.push("S scan", "R refresh", "Esc close")
+            if (root.cursorRow && root.cursorRow.type === "device" && root.cursorRow.dev.canProfile === true) parts.push("M mic")
+            parts.push("S scan", "D copy diagnostics", "R refresh", "Esc close")
             return parts.join("   ")
           }
           color: root.dim
@@ -419,7 +423,9 @@ Panel {
 
     readonly property bool hasBattery: isDevice && dev.battery !== null && dev.battery !== undefined
     readonly property int battery: hasBattery ? Number(dev.battery) : 0
-    readonly property bool lowBattery: hasBattery && battery <= 20
+    readonly property bool lowBattery: hasBattery && battery <= (root.hostWidget ? root.hostWidget.lowBatteryLevel : 20)
+    readonly property bool canProfile: isDevice && connected && dev.canProfile === true
+    readonly property bool inCall: canProfile && dev.profile === "hfp"
 
     readonly property var dropped: isAdapter && !adapterOn && rowHot ? root.droppedDevices(adapter.hci) : []
     readonly property bool rowHot: hasCursor || hover.hovered
@@ -539,6 +545,19 @@ Panel {
         fontSize: Style.font.title
         enabled: !root.busy
         onClicked: if (root.hostWidget) root.hostWidget.toggleScan(row.adapter.hci)
+      }
+
+      // Music (A2DP) or call mode with a microphone (HFP) for a connected headset.
+      PanelActionButton {
+        visible: row.canProfile && !row.confirming
+        anchors.verticalCenter: parent.verticalCenter
+        iconText: row.inCall ? "󰋎" : "󰋋"
+        tooltipText: row.inCall ? "Call mode (microphone on). Click for music quality" : "Music quality. Click for call mode with microphone"
+        foreground: row.inCall ? root.foreground : root.dim
+        fontFamily: root.fontFamily
+        fontSize: Style.font.title
+        enabled: !root.busy
+        onClicked: root.hostWidget.toggleProfile(row.dev)
       }
 
       PanelActionButton {

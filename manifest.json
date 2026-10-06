@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.cesarfilho.bluetooth-adapter-switch",
   "name": "Bluetooth Adapter Switch",
-  "version": "1.4.2",
+  "version": "1.5.0",
   "author": "cesarfilho",
   "license": "MIT",
-  "description": "Switch between the onboard Bluetooth adapter and a USB dongle from the bar, keeping exactly one active (a plugged-in dongle takes over automatically). A panel shows each adapter and its devices: connect, pair, forget, battery, scan, and the sound follows the headset.",
+  "description": "Switch between the onboard Bluetooth adapter and a USB dongle from the bar, keeping exactly one active (a plugged-in dongle takes over automatically, and your headset reconnects). A panel shows each adapter and its devices: connect, pair, forget, battery, scan, music or call mode, and the sound follows the headset.",
   "kinds": [
     "bar-widget"
   ],
@@ -26,7 +26,11 @@
       "notify": true,
       "keepOneOn": true,
       "scanTransport": "Classic (headsets, speakers)",
-      "preferred": "USB dongle"
+      "preferred": "USB dongle",
+      "autoReconnect": true,
+      "batteryAlert": 20,
+      "connectTimeoutSec": 15,
+      "errorDismissSec": 12
     },
     "schema": [
       {
@@ -41,10 +45,11 @@
         "label": "Preferred adapter",
         "options": [
           "USB dongle",
-          "Onboard"
+          "Onboard",
+          "Last used"
         ],
         "defaultValue": "USB dongle",
-        "description": "Which adapter is active when several are present, for example right after plugging in a dongle."
+        "description": "Which adapter is active when several are present, for example right after plugging in a dongle. Last used picks the adapter your last device was connected through."
       },
       {
         "key": "labelMode",
@@ -91,6 +96,42 @@
         "type": "boolean",
         "label": "Notify after switching",
         "defaultValue": true
+      },
+      {
+        "key": "autoReconnect",
+        "type": "boolean",
+        "label": "Reconnect devices after the adapter changes",
+        "defaultValue": true,
+        "description": "When another adapter becomes active (dongle unplugged, Bluetooth switched back on), reconnect the devices you had connected, if they are paired to it."
+      },
+      {
+        "key": "batteryAlert",
+        "type": "integer",
+        "label": "Low battery alert (%)",
+        "min": 0,
+        "max": 50,
+        "step": 5,
+        "defaultValue": 20,
+        "description": "Notify once when a connected device drops to this level, and show it in red. 0 turns the notification off."
+      },
+      {
+        "key": "connectTimeoutSec",
+        "type": "integer",
+        "label": "Connect timeout (seconds)",
+        "min": 5,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 15,
+        "description": "How long to wait for a device to answer before giving up."
+      },
+      {
+        "key": "errorDismissSec",
+        "type": "integer",
+        "label": "Hide error messages after (seconds)",
+        "min": 3,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 12
       },
       {
         "key": "refreshIntervalSec",

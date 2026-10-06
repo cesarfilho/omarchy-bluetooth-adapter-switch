@@ -15,6 +15,14 @@
 #   bt-adapter.sh connect|disconnect <hciN> <ADDRESS>
 #   bt-adapter.sh pair <hciN> <ADDRESS>   pair, trust and connect a new device
 #   bt-adapter.sh audio <ADDRESS>         make that device the default audio output
+#   bt-adapter.sh profile <ADDRESS> [toggle|a2dp|hfp]
+#                               switch a headset between music (A2DP) and call
+#                               mode with a microphone (HFP)
+#   bt-adapter.sh switch-connect <hciN> <ADDRESS>
+#                               switch to that adapter if needed, then connect
+#   bt-adapter.sh reconnect <hciN>        reconnect the devices that were connected
+#                               before the adapter changed (prints their names)
+#   bt-adapter.sh diagnostics [--copy]    anonymised report to paste into an issue
 #   bt-adapter.sh log [lines]   show the end of the plugin log (see "Logging" below)
 #   bt-adapter.sh scan <hciN> [seconds] [bredr|le|auto]
 #                               look for devices on one adapter until the process
@@ -22,7 +30,7 @@
 #
 # Exactly one adapter is active at a time. [pref] is "usb" (default: a removable
 # dongle wins over the onboard chip, and the onboard chip is used when the dongle
-# is gone) or "onboard".
+# is gone), "onboard", or "last" (the adapter a device was last connected through).
 #
 # Runs entirely with the logged-in user's own permissions: rfkill is writable
 # through the logind ACL on /dev/rfkill, and BlueZ accepts property writes from
@@ -48,6 +56,40 @@ log() { # <LEVEL> <message...>
   fi
   (umask 077; printf '%s %-5s [%s] %s\n' "$(date '+%F %T')" "$level" "$$" "$*" >>"$LOG") 2>/dev/null
   return 0
+}
+
+# What the plugin remembers between runs, in $PROFILES (owner-only):
+#   last         addresses of the devices you want connected (added on connect and
+#                pair, removed on disconnect and forget); reconnect() restores them
+#   lastAdapter  address of the adapter the last device was connected through
+#   devices      per device address, the adapter address it was last used with
+# Adapters are identified by their Bluetooth address, never by hciN: the number
+# changes when a dongle is replugged.
+PROFILES=$STATE_DIR/profiles.json
+CONNECT_TIMEOUT=${BT_CONNECT_TIMEOUT:-15}
+[[ $CONNECT_TIMEOUT =~ ^[0-9]+$ ]] || CONNECT_TIMEOUT=15
+
+state_get() { jq -c . "$PROFILES" 2>/dev/null || echo '{}'; }
+
+state_set() { # <jq filter> [jq args...]
+  local filter=$1 new; shift
+  new=$(state_get | jq -c "$@" "$filter" 2>/dev/null) || return 0
+  (umask 077; mkdir -p "$STATE_DIR"; printf '%s\n' "$new" >"$PROFILES.tmp" && mv -f "$PROFILES.tmp" "$PROFILES") 2>/dev/null
+  return 0
+}
+
+remember_connected() { # <hci> <address>
+  local adm; adm=$(prop "$1" Address)
+  [[ -n $adm ]] || return 0
+  # shellcheck disable=SC2016
+  state_set '.last = (((.last // []) - [$a]) + [$a]) | .lastAdapter = $m | .devices[$a].adapter = $m' \
+    --arg a "${2^^}" --arg m "$adm"
+}
+
+forget_wanted() { # <address> [drop]   stop reconnecting it; "drop" also forgets its adapter
+  # shellcheck disable=SC2016
+  state_set '.last = ((.last // []) - [$a]) | if $drop == "1" then del(.devices[$a]) else . end' \
+    --arg a "${1^^}" --arg drop "$([[ ${2:-} == drop ]] && echo 1 || echo 0)"
 }
 
 adapters() {
@@ -135,17 +177,19 @@ adapter_info_read() { # <hci> -> kind<TAB>model, straight from sysfs/udev
 }
 
 json() {
-  local managed rf hci info kind model rows=""
+  local managed rf cards hci info kind model rows=""
   managed=$(busctl --system --json=short call "$BLUEZ" / org.freedesktop.DBus.ObjectManager GetManagedObjects 2>/dev/null) ||
     managed='{"data":[{}]}'
   rf=$(rfkill -J -o DEVICE,TYPE,SOFT 2>/dev/null) || rf='{}'
+  cards=$(pactl -f json list cards 2>/dev/null)
+  [[ $cards == \[* ]] || cards='[]'
   for hci in $(adapters); do
     info=$(adapter_info "$hci")
     kind=${info%%$'\t'*}
     model=${info#*$'\t'}
     rows+="$hci"$'\t'"$kind"$'\t'"$model"$'\n'
   done
-  jq -n --argjson bz "$managed" --argjson rf "$rf" --arg rows "$rows" '
+  jq -n --argjson bz "$managed" --argjson rf "$rf" --argjson cards "$cards" --arg rows "$rows" '
     ($bz.data[0] // {}) as $o
     | [ $rows | split("\n")[] | select(length > 0) | split("\t")
         | { hci: .[0], kind: .[1], model: (.[2] // "") } as $s
@@ -158,10 +202,18 @@ json() {
             devices: [ $o | to_entries[]
                        | select(.value["org.bluez.Device1"] != null)
                        | .value as $v | $v["org.bluez.Device1"] as $d
+                       | ($cards | map(select(($d.Connected.data // false) and .name == "bluez_card." + ($d.Address.data | gsub(":"; "_")))) | .[0]) as $c
                        | select($d.Adapter.data == "/org/bluez/" + $s.hci and $d.Paired.data == true)
                        | { address: $d.Address.data, name: ($d.Alias.data // $d.Address.data),
                            connected: ($d.Connected.data // false),
                            battery: ($v["org.bluez.Battery1"].Percentage.data // null),
+                           profile: (if $c == null then ""
+                                     elif ($c.active_profile | test("^a2dp")) then "a2dp"
+                                     elif ($c.active_profile | test("^(headset-head-unit|handsfree)")) then "hfp"
+                                     else "" end),
+                           canProfile: ($c != null
+                                        and ([$c.profiles | keys[] | select(test("^a2dp"))] | length > 0)
+                                        and ([$c.profiles | keys[] | select(test("^(headset-head-unit|handsfree)"))] | length > 0)),
                            hasProfile: ($d.Icon != null or $d.Class != null
                                         or ([$d.UUIDs.data[]? | select(test("^0000(110b|111e|110e|1124|1812)-"))] | length > 0)) } ],
             nearby: [ $o | to_entries[]
@@ -227,7 +279,16 @@ next() {
 # The adapter that should be active: the preferred kind if present, otherwise
 # the first adapter there is.
 preferred() { # [usb|onboard] -> hciN
-  local want=${1:-usb} hci first="" info
+  local want=${1:-usb} hci first="" info last
+  if [[ $want == last ]]; then
+    last=$(state_get | jq -r '.lastAdapter // empty')
+    if [[ -n $last ]]; then
+      for hci in $(adapters); do
+        [[ $(prop "$hci" Address) == "$last" ]] && { echo "$hci"; return; }
+      done
+    fi
+    want=usb
+  fi
   for hci in $(adapters); do
     [[ -n $first ]] || first=$hci
     info=$(adapter_info "$hci")
@@ -282,6 +343,7 @@ forget() { # <hci> <address>
     echo "could not forget $addr on $hci: ${err#Call failed: }" >&2
     exit 1
   fi
+  forget_wanted "$addr" drop
 }
 
 dev_path() { # <hci> <address> -> BlueZ object path, validating both
@@ -352,19 +414,129 @@ audio_output() { # <address>
 connect() { # <hci> <address>
   local p; p=$(dev_path "$1" "$2") || exit $?
   adapter_on "$1"
-  if ! dev_call "$p" Connect 15; then
+  if ! dev_call "$p" Connect "$CONNECT_TIMEOUT"; then
     # A Connect that never answered keeps running inside BlueZ and makes the
     # next attempt fail with InProgress; Disconnect cancels it.
     timeout 5 busctl --system call "$BLUEZ" "$p" org.bluez.Device1 Disconnect >/dev/null 2>&1 || true
     le_only_hint "$p"
     exit 1
   fi
+  remember_connected "$1" "$2"
   audio_output "$2" || true
+}
+
+# Connect a device on an adapter that is not the one in use: switch to it first.
+switch_connect() { # <hci> <address>
+  valid_adapter "$1" || { echo "unknown adapter: $1" >&2; exit 2; }
+  if [[ $(prop "$1" Powered) != true ]] || is_blocked "$1" || [[ $(active_count) != 1 ]]; then
+    use "$1"
+  fi
+  connect "$1" "$2"
+}
+
+# Does this device expose an audio card to PipeWire/PulseAudio? The card shows
+# up a moment after the link.
+has_audio_card() { # <address>
+  local i
+  for i in {1..6}; do
+    pactl list short cards 2>/dev/null | grep -q "bluez_card\.${1^^}" && return 0
+    sleep 0.4
+  done
+  return 1
+}
+
+# After an adapter change (a dongle was unplugged, Bluetooth was switched back
+# on), reconnect what the user had connected and that is paired on this adapter.
+# Best effort: a device that is switched off just stays disconnected.
+reconnect() { # <hci>
+  local hci=$1 addr name last="" wanted data
+  valid_adapter "$hci" || { echo "unknown adapter: $hci" >&2; exit 2; }
+  [[ $(prop "$hci" Powered) == true ]] || return 0
+  wanted=$(state_get | jq -r '(.last // [])[]')
+  [[ -n $wanted ]] || return 0
+  data=$(json | jq -r --arg h "$hci" '.[] | select(.hci == $h) | .devices[] | select(.connected | not) | "\(.address)\t\(.name)"')
+  while IFS= read -r addr; do
+    name=$(awk -F'\t' -v a="$addr" '$1 == a { print $2 }' <<<"$data")
+    [[ -n $name ]] || continue
+    if dev_call "$(dev_path "$hci" "$addr")" Connect "${BT_RECONNECT_TIMEOUT:-8}" 2>/dev/null; then
+      printf '%s\n' "$name"
+      last=$addr
+      log INFO "reconnect: $addr on $hci"
+    else
+      log WARN "reconnect: $addr on $hci did not answer"
+    fi
+  done <<<"$wanted"
+  if [[ -n $last ]] && has_audio_card "$last"; then
+    remember_connected "$hci" "$last"
+    audio_output "$last" || true
+  fi
+  return 0
+}
+
+# Headsets expose music (A2DP) and call (HFP, with microphone) as card profiles.
+profile() { # <address> [toggle|a2dp|hfp]
+  local addr=${1^^} want=${2:-toggle} card cards cur names a2dp hfp target
+  [[ $addr =~ ^([0-9A-F]{2}:){5}[0-9A-F]{2}$ ]] || { echo "invalid address: $1" >&2; exit 2; }
+  card=bluez_card.${addr//:/_}
+  cards=$(pactl -f json list cards 2>/dev/null)
+  cur=$(jq -r --arg c "$card" '.[] | select(.name == $c) | .active_profile' <<<"$cards" 2>/dev/null)
+  [[ -n $cur ]] || { echo "no audio card for this device (is it connected?)" >&2; exit 1; }
+  names=$(jq -r --arg c "$card" '.[] | select(.name == $c) | .profiles | keys[]' <<<"$cards")
+  a2dp=$(grep -x 'a2dp-sink' <<<"$names" || grep -m1 '^a2dp' <<<"$names")
+  hfp=$(grep -x 'headset-head-unit' <<<"$names" || grep -m1 -E '^(headset-head-unit|handsfree)' <<<"$names")
+  if [[ $want == toggle ]]; then
+    [[ $cur == a2dp* ]] && want=hfp || want=a2dp
+  fi
+  target=$a2dp; [[ $want == hfp ]] && target=$hfp
+  [[ -n $target ]] || { echo "this device has no $want profile" >&2; exit 1; }
+  pactl set-card-profile "$card" "$target" || { echo "could not switch the audio profile" >&2; exit 1; }
+  log INFO "profile: $card $cur -> $target"
+  audio_output "$addr" || true
+}
+
+# MAC addresses are masked to their vendor part so the report is safe to paste.
+mask_addresses() {
+  sed -E 's/(([0-9A-Fa-f]{2}[:_]){3})([0-9A-Fa-f]{2}[:_]){2}[0-9A-Fa-f]{2}/\1XX:XX:XX/g'
+}
+
+diagnostics() { # [--copy]
+  local dir report
+  dir=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+  report=$({
+    echo "Bluetooth Adapter Switch $(jq -r .version "$dir/manifest.json" 2>/dev/null)"
+    echo "Date:   $(date '+%F %T %z')"
+    echo "Kernel: $(uname -r)"
+    echo "BlueZ:  $(bluetoothctl --version 2>/dev/null)"
+    echo "Audio:  $(pactl info 2>/dev/null | sed -n 's/^Server Name: //p')"
+    echo
+    echo "Adapters:"
+    json | jq -r '.[] | "  \(.hci) \(.kind) \(.model) powered=\(.powered) blocked=\(.blocked) paired=\(.devices | length) connected=\([.devices[] | select(.connected)] | length)"'
+    echo
+    echo "Paired devices (names left out):"
+    json | jq -r '.[] | .hci as $h | .devices | to_entries[] | "  \($h) #\(.key + 1) connected=\(.value.connected) hasProfile=\(.value.hasProfile) battery=\(.value.battery) audio=\(.value.profile)"'
+    echo
+    echo "rfkill:"
+    rfkill -J -o ID,DEVICE,SOFT,HARD 2>/dev/null | jq -c '.rfkilldevices[]'
+    echo
+    echo "Plugin log (last 40 lines):"
+    tail -n 40 "$LOG" 2>/dev/null
+    echo
+    echo "bluetoothd (last 5 minutes):"
+    journalctl -u bluetooth --since "-5min" --no-pager -q 2>/dev/null | grep -v adv_monitor | tail -20
+  } 2>&1 | mask_addresses)
+  if [[ ${1:-} == --copy ]]; then
+    command -v wl-copy >/dev/null || { echo "wl-copy is not installed (package wl-clipboard)" >&2; exit 1; }
+    # wl-copy stays alive to serve the clipboard: cut it off from our pipes.
+    wl-copy 3>&- >/dev/null 2>&1 <<<"$report"
+  else
+    printf '%s\n' "$report"
+  fi
 }
 
 disconnect() { # <hci> <address>
   local p; p=$(dev_path "$1" "$2") || exit $?
   dev_call "$p" Disconnect 10 || exit 1
+  forget_wanted "$2"
 }
 
 pair() { # <hci> <address>   exit 4 = paired, but the first connect failed
@@ -377,10 +549,11 @@ pair() { # <hci> <address>   exit 4 = paired, but the first connect failed
   dev_call "$p" Pair 40 || exit 1
   # Trusted lets the device reconnect by itself next time.
   busctl --system set-property "$BLUEZ" "$p" org.bluez.Device1 Trusted b true >/dev/null 2>&1 || true
-  if ! cerr=$(dev_call "$p" Connect 15 2>&1); then
+  if ! cerr=$(dev_call "$p" Connect "$CONNECT_TIMEOUT" 2>&1); then
     echo "Paired, but could not connect: $cerr" >&2
     exit 4
   fi
+  remember_connected "$1" "$2"
   audio_output "$2" || true
 }
 
@@ -448,7 +621,7 @@ on_action_exit() {
 [[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
 
 case ${1:-} in
-  use|next|auto|ensure|forget|connect|disconnect|pair|scan|audio)
+  use|next|auto|ensure|forget|connect|disconnect|pair|scan|audio|profile|switch-connect|reconnect|diagnostics)
     ACTION_ARGS=$*
     ACTION_ARR=("$@")
     ACTION_START_NS=$(date +%s%N)
@@ -477,7 +650,11 @@ case ${1:-status} in
   disconnect) disconnect "${2:?usage: bt-adapter.sh disconnect <hciN> <ADDRESS>}" "${3:?usage}" ;;
   pair) pair "${2:?usage: bt-adapter.sh pair <hciN> <ADDRESS>}" "${3:?usage}" ;;
   audio) audio_output "${2:?usage: bt-adapter.sh audio <ADDRESS>}" || exit 1 ;;
+  profile) profile "${2:?usage: bt-adapter.sh profile <ADDRESS> [toggle|a2dp|hfp]}" "${3:-toggle}" ;;
+  switch-connect) switch_connect "${2:?usage: bt-adapter.sh switch-connect <hciN> <ADDRESS>}" "${3:?usage}" ;;
+  reconnect) reconnect "${2:?usage: bt-adapter.sh reconnect <hciN>}" ;;
+  diagnostics) diagnostics "${2:-}" ;;
   scan) scan "${2:?usage: bt-adapter.sh scan <hciN> [seconds] [bredr|le|auto]}" "${3:-45}" "${4:-bredr}" ;;
   forget) forget "${2:?usage: bt-adapter.sh forget <hciN> <ADDRESS>}" "${3:?usage: bt-adapter.sh forget <hciN> <ADDRESS>}" ;;
-  *) echo "usage: bt-adapter.sh status|json|log|use <hciN>|next|auto|ensure|watch|forget|connect|disconnect|pair <hciN> <ADDRESS>|scan <hciN> [secs]|audio <ADDRESS>" >&2; exit 64 ;;
+  *) echo "usage: bt-adapter.sh status|json|log|use <hciN>|next|auto|ensure|watch|forget|connect|disconnect|pair <hciN> <ADDRESS>|scan <hciN> [secs]|audio <ADDRESS>|profile <ADDRESS>|switch-connect <hciN> <ADDRESS>|reconnect <hciN>|diagnostics [--copy]" >&2; exit 64 ;;
 esac
