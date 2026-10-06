@@ -62,7 +62,7 @@ check "BlueZ down: still valid JSON" '2 false' "$(json | jq -r '"\(length) \(.[0
 
 # ---- adapter_info cache -------------------------------------------------
 
-rm -rf "$XDG_CACHE_HOME"/omarchy-blueswitch "$INFO_COUNT"
+rm -rf "$XDG_CACHE_HOME"/omarchy-bluetooth-adapter-switch "$INFO_COUNT"
 reads() { wc -l <"$INFO_COUNT" | tr -d ' '; }
 adapter_info hci0 >/dev/null; adapter_info hci0 >/dev/null
 check "info is read once, then cached"  '1'      "$(reads)"

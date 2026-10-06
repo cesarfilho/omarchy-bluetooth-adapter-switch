@@ -134,7 +134,7 @@ BarWidget {
       var data = JSON.parse(String(text))
       if (Array.isArray(data)) adapters = data
     } catch (e) {
-      console.warn("[blueswitch] could not parse adapter state: " + e)
+      console.warn("[bt-adapter-switch] could not parse adapter state: " + e)
       lastError = "Could not read adapter state"
     }
     loaded = true
@@ -187,10 +187,10 @@ BarWidget {
   function run(args, target, failText) {
     if (busy) {
       ensureRun = false
-      console.log("[blueswitch] ignored " + args.join(" ") + ": another action is running")
+      console.log("[bt-adapter-switch] ignored " + args.join(" ") + ": another action is running")
       return false
     }
-    console.log("[blueswitch] run " + args.join(" "))
+    console.log("[bt-adapter-switch] run " + args.join(" "))
     busy = true
     pending = target
     lastError = ""
@@ -371,7 +371,7 @@ BarWidget {
     command: []
     stderr: StdioCollector { id: actionErr; waitForEnd: true }
     onExited: function(exitCode) {
-      console.log("[blueswitch] exit " + exitCode + (exitCode === 0 ? "" : ": " + String(actionErr.text).trim()))
+      console.log("[bt-adapter-switch] exit " + exitCode + (exitCode === 0 ? "" : ": " + String(actionErr.text).trim()))
       // Remember a failed automatic attempt so settle() backs off.
       if (root.ensureRun) root.ensureFailedAt = exitCode === 0 ? 0 : Date.now()
       root.ensureRun = false
@@ -387,7 +387,7 @@ BarWidget {
         // message already says so, so the "Could not pair" prefix would mislead.
         var pairedOnly = exitCode === 4 && why !== "" && root.failPrefix.indexOf("Could not pair") === 0
         var head = pairedOnly ? "" : (root.failPrefix !== "" ? root.failPrefix : "Action failed") + ": "
-        root.lastError = head + (why !== "" ? why : "exit code " + exitCode) + "\nDetails: ~/.local/state/omarchy-blueswitch/plugin.log"
+        root.lastError = head + (why !== "" ? why : "exit code " + exitCode) + "\nDetails: ~/.local/state/omarchy-bluetooth-adapter-switch/plugin.log"
         root.notify(pairedOnly ? "Paired, but not connected" : (root.failPrefix !== "" ? root.failPrefix : "Bluetooth action failed"),
                     why !== "" ? why : "exit code " + exitCode, "󰂲", "critical")
       }

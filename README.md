@@ -1,13 +1,10 @@
-# BlueSwitch
+# Bluetooth Adapter Switch
 
 An [Omarchy](https://omarchy.org/) bar widget for machines with two Bluetooth
 adapters, typically the onboard chip plus a USB dongle. It keeps **exactly one
 adapter active**, switches on its own when you plug or unplug the dongle, and
 gives you a panel to manage the devices of each adapter: connect, pair, forget,
 see the battery, and have the sound follow the headset.
-
-> Formerly *Bluetooth Adapter Switch*. The plugin id is unchanged, so existing
-> installs and your `shell.json` keep working.
 
 ![Adapter panel](preview.png)
 
@@ -153,7 +150,7 @@ appears, the log says so.
 ### 8. Logs for diagnosing problems
 
 Every action (switch, connect, disconnect, pair, forget, scan, audio) is written
-to `~/.local/state/omarchy-blueswitch/plugin.log` with its command,
+to `~/.local/state/omarchy-bluetooth-adapter-switch/plugin.log` with its command,
 outcome and duration. When an action fails, the log also gets a snapshot to
 diagnose it: the rfkill state, the adapters, every BlueZ property of the device
 involved (paired, trusted, connected, UUIDs, signal…) and the latest
@@ -163,7 +160,7 @@ file are readable by you only. The widget itself logs to the shell journal.
 
 ```bash
 bash ~/.config/omarchy/plugins/io.github.cesarfilho.bluetooth-adapter-switch/bt-adapter.sh log 80
-journalctl -b | grep blueswitch
+journalctl -b | grep bt-adapter-switch
 ```
 
 ### 9. Keyboard and keybinding
@@ -182,7 +179,7 @@ omarchy-shell io.github.cesarfilho.bluetooth-adapter-switch toggle
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/cesarfilho/omarchy-blueswitch.git --enable
+omarchy plugin add https://github.com/cesarfilho/omarchy-bluetooth-adapter-switch.git --enable
 ```
 
 Or by hand: clone this repository into
@@ -202,7 +199,7 @@ omarchy plugin remove io.github.cesarfilho.bluetooth-adapter-switch
 ```
 
 If an adapter is still blocked, unblock it first with `rfkill unblock bluetooth`.
-The log in `~/.local/state/omarchy-blueswitch/` can be deleted.
+The log in `~/.local/state/omarchy-bluetooth-adapter-switch/` can be deleted.
 
 ## Settings
 

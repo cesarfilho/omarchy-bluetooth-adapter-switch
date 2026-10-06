@@ -1,8 +1,8 @@
 {
   "schemaVersion": 1,
   "id": "io.github.cesarfilho.bluetooth-adapter-switch",
-  "name": "BlueSwitch",
-  "version": "1.4.1",
+  "name": "Bluetooth Adapter Switch",
+  "version": "1.4.2",
   "author": "cesarfilho",
   "license": "MIT",
   "description": "Switch between the onboard Bluetooth adapter and a USB dongle from the bar, keeping exactly one active (a plugged-in dongle takes over automatically). A panel shows each adapter and its devices: connect, pair, forget, battery, scan, and the sound follows the headset.",
@@ -13,7 +13,7 @@
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "BlueSwitch",
+    "displayName": "Bluetooth Adapter Switch",
     "description": "Shows the active Bluetooth adapter and its devices, and lets you switch adapters, connect, pair and forget devices from a panel.",
     "category": "Hardware",
     "allowMultiple": false,
