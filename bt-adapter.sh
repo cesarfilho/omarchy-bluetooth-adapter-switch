@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bluetooth adapter helper for the Omarchy "Bluetooth Adapter Switch" plugin.
+# Bluetooth adapter helper for the Omarchy BlueSwitch plugin.
 #
 #   bt-adapter.sh status        one line per adapter: hciN|ADDRESS|ALIAS|powered|blocked
 #   bt-adapter.sh json          JSON array with everything the widget shows: kind
@@ -36,7 +36,7 @@ BLUEZ=org.bluez
 # rfkill, the device involved and the latest bluetoothd messages, so a problem
 # can be diagnosed after the error has left the screen. Polling (status/json) is
 # not logged. The file rotates at 256 KB, keeping one previous copy.
-STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-bluetooth-adapter-switch
+STATE_DIR=${XDG_STATE_HOME:-$HOME/.local/state}/omarchy-blueswitch
 LOG=$STATE_DIR/plugin.log
 
 log() { # <LEVEL> <message...>
@@ -99,7 +99,7 @@ adapter_key() { # <hci> -> "sysfs path|vendor:product"; changes when another ada
 # is cached per hciN, keyed by sysfs path plus USB vendor:product, so a replug into another port or
 # a different dongle under the same name is looked up again.
 adapter_info() { # <hci> -> kind<TAB>model
-  local key cache=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-bluetooth-adapter-switch/info-$1 cached info
+  local key cache=${XDG_CACHE_HOME:-$HOME/.cache}/omarchy-blueswitch/info-$1 cached info
   key=$(adapter_key "$1")
   if [[ -n $key && -r $cache ]]; then
     { read -r cached; IFS= read -r info; } <"$cache"

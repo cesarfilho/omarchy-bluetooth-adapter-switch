@@ -135,5 +135,5 @@ jobs:
           )
           gh issue create \
             --repo omacom/omarchy-plugin-marketplace \
-            --title "[Verify]: Bluetooth Adapter Switch $VERSION" \
+            --title "[Verify]: BlueSwitch $VERSION" \
             --body "$body"
