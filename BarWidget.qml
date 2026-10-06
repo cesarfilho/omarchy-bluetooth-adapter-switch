@@ -31,8 +31,13 @@ BarWidget {
   // Adapters seen on the previous read ("hciN:ADDRESS,..."), to notice plug and
   // unplug; empty until the first read so starting the shell never switches.
   property string knownSet: ""
-  // Text for the notification when the running action succeeds.
+  // Notification for the running action when it succeeds: headline, body and
+  // glyph. An empty doneTitle means the action announces the adapter instead.
+  property string doneTitle: ""
   property string doneMessage: ""
+  property string doneGlyph: "󰂯"
+  // Id of the last toast, so the next one replaces it instead of stacking.
+  property int lastNotifId: 0
   // Start of the error text if the running action fails, e.g. "Could not connect to X".
   property string failPrefix: ""
   // The hciN currently looking for devices ("" when not scanning).
@@ -189,7 +194,7 @@ BarWidget {
     busy = true
     pending = target
     lastError = ""
-    if (failText !== undefined) { doneMessage = ""; failPrefix = failText }
+    if (failText !== undefined) { setDone("", "", "󰂯"); failPrefix = failText }
     actionProc.command = ["bash", helper].concat(args)
     actionProc.running = true
     return true
@@ -203,14 +208,14 @@ BarWidget {
     // Already the only active adapter: nothing to do.
     if (active && active.hci === hci && poweredCount === 1) return
     stopScan()
-    doneMessage = ""
+    setDone("", "", "󰂯")
     failPrefix = "Could not switch"
     run(["use", hci], hci)
   }
   function next() {
     if (busy || !switchable) return
     stopScan()
-    doneMessage = ""
+    setDone("", "", "󰂯")
     failPrefix = "Could not switch"
     run(["next"], "next")
   }
@@ -221,25 +226,25 @@ BarWidget {
   }
   function forget(hci, address, name) {
     if (busy) return
-    doneMessage = "Forgot " + name
+    setDone("Forgot device", name, "󰅙")
     failPrefix = "Could not forget " + name
     run(["forget", hci, address], "dev:" + address)
   }
   function connectDevice(hci, d) {
     if (busy) return
-    doneMessage = "Connected to " + d.name
+    setDone("Connected", d.name, "󰂱")
     failPrefix = "Could not connect to " + d.name
     run(["connect", hci, d.address], "dev:" + d.address)
   }
   function disconnectDevice(hci, d) {
     if (busy) return
-    doneMessage = "Disconnected " + d.name
+    setDone("Disconnected", d.name, "󰂲")
     failPrefix = "Could not disconnect " + d.name
     run(["disconnect", hci, d.address], "dev:" + d.address)
   }
   function pairDevice(hci, d) {
     if (busy) return
-    doneMessage = "Paired with " + d.name
+    setDone("Paired", d.name, "󰂱")
     failPrefix = "Could not pair with " + d.name
     run(["pair", hci, d.address], "dev:" + d.address)
   }
@@ -258,23 +263,36 @@ BarWidget {
   }
   function toggleScan(hci) { scanning === hci ? stopScan() : startScan(hci) }
 
-  function announce() {
+  function setDone(title, message, glyph) {
+    doneTitle = title
+    doneMessage = message
+    doneGlyph = glyph
+  }
+
+  // One toast per event, built by Omarchy's own notifier: a glyph instead of a
+  // generic icon, the previous toast replaced rather than stacked, and a click
+  // that opens this panel. Argument words stay separate, never one shell string.
+  function notify(headline, body, glyph, urgency) {
     if (!notifyOnSwitch) return
-    var title = "Bluetooth adapter"
-    var body
-    if (active) body = "Using " + nameFor(active) + (active.model ? " · " + active.model : "")
-    else body = "No adapter is active"
-    notifyProc.command = ["notify-send", "-a", "Bluetooth Adapter Switch", "-i", "bluetooth",
-                          "-h", "string:x-canonical-private-synchronous:bt-adapter-switch", title, body]
+    notifyProc.command = ["omarchy-notification-send", "--app-name", "Bluetooth", "-g", glyph, "-u", urgency,
+                          "-r", String(lastNotifId), "-p", headline, body,
+                          "--exec", "omarchy-shell", "io.github.cesarfilho.bluetooth-adapter-switch", "open"]
     notifyProc.running = true
   }
 
+  // After a switch: which adapter is in use, and what is connected to it.
+  function announce() {
+    if (!active) { notify("No Bluetooth adapter active", "Open the panel to pick one", "󰂲", "normal"); return }
+    var linked = []
+    for (var i = 0; i < active.devices.length; i++)
+      if (active.devices[i].connected) linked.push(active.devices[i].name)
+    var body = active.model ? active.model + " · " + active.hci : active.hci
+    if (linked.length > 0) body += "\n" + linked.join(", ") + " connected"
+    notify("Using " + nameFor(active), body, "󰂯", "low")
+  }
+
   function notifyDone() {
-    if (!notifyOnSwitch) return
-    notifyProc.command = ["notify-send", "-a", "Bluetooth Adapter Switch", "-i", "bluetooth",
-                          "-h", "string:x-canonical-private-synchronous:bt-adapter-switch",
-                          "Bluetooth adapter", doneMessage]
-    notifyProc.running = true
+    notify(doneTitle, doneMessage, doneGlyph, "low")
   }
 
   // The bar and the popup host drive the panel through its owner: an outside
@@ -359,7 +377,7 @@ BarWidget {
       root.ensureRun = false
       root.busy = false
       root.pending = ""
-      if (exitCode === 0 && root.doneMessage !== "") {
+      if (exitCode === 0 && root.doneTitle !== "") {
         root.notifyDone()
       } else if (exitCode === 0) {
         root.announceNext = true
@@ -370,13 +388,10 @@ BarWidget {
         var pairedOnly = exitCode === 4 && why !== "" && root.failPrefix.indexOf("Could not pair") === 0
         var head = pairedOnly ? "" : (root.failPrefix !== "" ? root.failPrefix : "Action failed") + ": "
         root.lastError = head + (why !== "" ? why : "exit code " + exitCode) + "\nDetails: ~/.local/state/omarchy-bluetooth-adapter-switch/plugin.log"
-        if (root.notifyOnSwitch) {
-          notifyProc.command = ["notify-send", "-u", "critical", "-a", "Bluetooth Adapter Switch",
-                                "-i", "dialog-error", "Bluetooth adapter", root.lastError]
-          notifyProc.running = true
-        }
+        root.notify(pairedOnly ? "Paired, but not connected" : (root.failPrefix !== "" ? root.failPrefix : "Bluetooth action failed"),
+                    why !== "" ? why : "exit code " + exitCode, "󰂲", "critical")
       }
-      root.doneMessage = ""
+      root.setDone("", "", "󰂯")
       root.failPrefix = ""
       root.refresh()
     }
@@ -403,7 +418,14 @@ BarWidget {
   }
   onLastErrorChanged: if (lastError !== "") errorTimer.restart()
 
-  Process { id: notifyProc; command: [] }
+  Process {
+    id: notifyProc
+    command: []
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root.lastNotifId = parseInt(String(text).trim(), 10) || 0
+    }
+  }
 
   Process {
     id: scanProc

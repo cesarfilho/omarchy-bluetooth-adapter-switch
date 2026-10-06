@@ -130,8 +130,11 @@ appears, the log says so.
 
 ### 7. Feedback and errors
 
-- A **desktop notification** confirms each switch, connect, pair and forget
-  (turn it off with `notify`). Failures are notified as critical.
+- A **desktop notification** confirms each switch, connect, disconnect, pair and
+  forget, each with its own headline and glyph (turn it off with `notify`). A
+  switch also lists what is connected to the adapter now in use. A new toast
+  replaces the previous one instead of stacking, and clicking it opens the
+  panel. Failures are notified as critical, with the reason in the body.
 - A **red banner in the panel** says what failed and with which device, for
   example *Could not connect to QCY AilyPods: no response from the device. Turn
   it on, bring it close and make sure no other device is connected to it*. It
@@ -295,7 +298,7 @@ tests/test.sh
 
 All are present on a standard Omarchy install: `bluez` and `bluez-utils`
 (BlueZ over D-Bus, `bluetoothctl` for scanning), `util-linux` (`rfkill`),
-`systemd` (`busctl`, `udevadm`), `libnotify` (`notify-send`), `jq`, `bash`, and
+`systemd` (`busctl`, `udevadm`), Omarchy's `omarchy-notification-send`, `jq`, `bash`, and
 `pipewire-pulse` (`pactl`) and `wireplumber` (`wpctl`) for the audio output.
 
 ## License
